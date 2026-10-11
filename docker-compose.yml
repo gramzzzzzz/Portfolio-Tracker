@@ -1,0 +1,18 @@
+services:
+  portfolio-tracker:
+    build: .
+    image: portfolio-tracker:latest
+    container_name: portfolio-tracker
+    restart: unless-stopped
+    ports:
+      - "8000:8000"              # change the left side to use another host port
+    volumes:
+      - ./data:/data             # sheet versions, SQLite metadata, uploaded notes, secret key
+      - ./seed:/seed:ro          # optional: seed/Invt.xlsx is imported as version 1 on first start
+    environment:
+      TZ: Asia/Kolkata
+      PT_SEED_SHEET: /seed/Invt.xlsx   # ignored if the file does not exist or a sheet is already stored
+      PT_LIVE_PRICES: "true"     # false = fully offline (sheet market rates only)
+      PT_COOKIE_SECURE: "false"  # true when served over HTTPS (reverse proxy)
+      PUID: "10001"              # user/group the app runs as and owns ./data
+      PGID: "10001"
