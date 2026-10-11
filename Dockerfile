@@ -32,8 +32,9 @@ COPY --from=ui /ui/dist ./static
 # make sure the test stage ran (and passed) before an image is produced
 COPY --from=test /app/requirements.txt /tmp/tested
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # starts as root, fixes /data ownership, then runs as uid PUID (default 10001)
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 VOLUME ["/data"]
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
