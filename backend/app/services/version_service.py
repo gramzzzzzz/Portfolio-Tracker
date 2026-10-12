@@ -1,18 +1,31 @@
 """Version management for the tracking sheet (the application's model).
 
-Every change creates an immutable, content-addressed snapshot. The newest version is the
-HEAD (the current sheet). Restoring an old snapshot never deletes history: it creates a new
-version whose content equals the old one (like `git revert`, not `git reset`).
+Every structural change (initial upload, contract-note import, manual upload, restore) creates
+an immutable, content-addressed snapshot. The newest version is the HEAD (the current sheet).
+Restoring an old snapshot never deletes history: it creates a new version whose content
+equals the old one (like `git revert`, not `git reset`).
+
+Exception, by the owner's choice: the periodic market-price refresh rewrites the HEAD
+version *in place* (only market-rate cells and the valuation date change), so hourly price
+updates do not flood the history. The superseded blob is deleted when no version uses it.
+
+Every write happens under :class:`SheetLock` and the current HEAD is mirrored to
+``<data>/current/<filename>`` (atomic replace) for terminal / file-share access.
 """
 from __future__ import annotations
 
-import threading
+import os
+import tempfile
+import time
 from collections import Counter
+from pathlib import Path
+from typing import Callable
 
 from app.dao.base import LayoutError, PortfolioSheetDAO
 from app.dao.repo.blobs import BlobStore
 from app.dao.repo.sqlite_repo import Repository
 from app.domain.models import SheetSnapshot
+from app.services.sheet_lock import SheetLock
 
 
 class NoSheetError(Exception):
@@ -20,12 +33,19 @@ class NoSheetError(Exception):
 
 
 class VersionService:
-    def __init__(self, repo: Repository, blobs: BlobStore, sheet_dao: PortfolioSheetDAO):
+    MIRROR_NAME = "Invt.xlsx"
+
+    def __init__(self, repo: Repository, blobs: BlobStore, sheet_dao: PortfolioSheetDAO,
+                 lock: SheetLock, mirror_dir: Path | None = None):
         self.repo = repo
         self.blobs = blobs
         self.dao = sheet_dao
-        self.write_lock = threading.RLock()  # serialises every mutation of HEAD
-        self._snap_cache: tuple[int, SheetSnapshot] | None = None
+        self.write_lock = lock  # serialises every mutation of HEAD (threads + processes)
+        self.mirror_dir = mirror_dir
+        self.on_change: Callable[[], None] | None = None  # e.g. kick a price sync after imports
+        self._snap_cache: tuple[tuple[int, str], SheetSnapshot] | None = None
+        if mirror_dir is not None and self.head_id() is not None and not self.mirror_path.exists():
+            self._mirror(self.head_bytes())
 
     # ---------------------------------------------------------------- reads
     def head_id(self) -> int | None:
@@ -51,11 +71,35 @@ class VersionService:
         hid = self.head_id()
         if hid is None:
             raise NoSheetError("No tracking sheet uploaded yet")
-        if self._snap_cache and self._snap_cache[0] == hid:
+        h = self.repo.version(hid)
+        key = (hid, h["sha256"])  # content can change in place (price refresh)
+        if self._snap_cache and self._snap_cache[0] == key:
             return self._snap_cache[1]
-        snap = self.dao.read(self.head_bytes())
-        self._snap_cache = (hid, snap)
+        snap = self.dao.read(self.blobs.get(h["sha256"]))
+        self._snap_cache = (key, snap)
         return snap
+
+    @property
+    def mirror_path(self) -> Path:
+        return (self.mirror_dir or Path(".")) / self.MIRROR_NAME
+
+    def _mirror(self, data: bytes) -> None:
+        """Atomically replace <data>/current/Invt.xlsx with the HEAD content."""
+        if self.mirror_dir is None:
+            return
+        self.mirror_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self.mirror_dir, prefix=".tmp-", suffix=".xlsx")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, self.mirror_path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
 
     def list(self) -> list[dict]:
         hid = self.head_id()
@@ -87,8 +131,29 @@ class VersionService:
                                         parent_id=parent, batch_id=batch_id, filename=filename, stats=stats)
             self.repo.put("head_version_id", vid)
             self.repo.audit("version.commit", {"version": vid, "source": source, "message": message})
-            self._snap_cache = (vid, snap)
-            return self.repo.version(vid)
+            self._snap_cache = ((vid, sha), snap)
+            self._mirror(data)
+        if self.on_change:
+            self.on_change()
+        return self.repo.version(vid)
+
+    def replace_head_content(self, data: bytes, *, note: str) -> dict:
+        """Swap HEAD's content without creating a version (market-price refresh only).
+        Caller must hold ``write_lock`` and must have produced ``data`` from the current HEAD."""
+        with self.write_lock:
+            head = self.head()
+            if not head:
+                raise NoSheetError("No tracking sheet uploaded yet")
+            snap = self.dao.read(data)
+            old_sha = head["sha256"]
+            sha = self.blobs.put(data)
+            self.repo.update_version_content(head["id"], sha, len(data), time.time())
+            if sha != old_sha and not self.repo.sha_in_use(old_sha):
+                self.blobs.delete(old_sha)
+            self._snap_cache = ((head["id"], sha), snap)
+            self._mirror(data)
+            self.repo.audit("prices.write", {"version": head["id"], "message": note})
+            return self.repo.version(head["id"])
 
     def upload(self, data: bytes, filename: str, message: str | None = None) -> dict:
         try:

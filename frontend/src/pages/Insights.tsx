@@ -2,168 +2,31 @@ import { Fragment, useState } from "react";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "../api";
 import { useApp } from "../App";
-import { Alert, Badge, Card, Empty, Kpi, Spinner, Tabs, useAsync } from "../components/ui";
-import { compactMoney, date, money, pct, qty, signedMoney, tone } from "../format";
+import { Alert, Card, Kpi, Spinner, Tabs, useAsync } from "../components/ui";
+import { compactMoney, date, money, pct, tone } from "../format";
 
-type Tab = "tax" | "charges" | "benchmark";
+type Tab = "charges" | "benchmark";
 
 export default function Insights() {
-  const [tab, setTab] = useState<Tab>("tax");
+  const [tab, setTab] = useState<Tab>("charges");
   return (
     <div className="stack">
       <div className="page-head">
         <div>
           <h1>Insights</h1>
-          <p>Decisions you can act on: tax planning, cost of trading and how you compare with the market.</p>
+          <p>What your trading costs you and how you compare with the market. Tax planning has its own page.</p>
         </div>
       </div>
       <Tabs<Tab>
         value={tab}
         onChange={setTab}
         tabs={[
-          { id: "tax", label: "Capital gains & tax" },
           { id: "charges", label: "Trading costs" },
           { id: "benchmark", label: "vs. benchmark" },
         ]}
       />
-      {tab === "tax" && <Tax />}
       {tab === "charges" && <Charges />}
       {tab === "benchmark" && <Benchmark />}
-    </div>
-  );
-}
-
-function Tax() {
-  const { live, epoch } = useApp();
-  const { data: d, error, loading } = useAsync(() => api.get<any>(`/api/portfolio/tax?live=${live}`), [live, epoch]);
-  if (loading && !d) return <Spinner />;
-  if (error) return <Alert tone="neg">{error.message}</Alert>;
-  const u = d.unrealised;
-  return (
-    <div className="stack">
-      <Alert tone="info">
-        Estimates for {d.fy} using STCG {d.rates.stcg}% / LTCG {d.rates.ltcg}% above {money(d.rates.exemption)} (edit in Settings). Holdings held more than 12 months are long term. This is a planning
-        aid, not tax advice.
-      </Alert>
-      <div className="grid g-kpi">
-        <Kpi label="Unrealised LT gains (equity)" value={signedMoney(u.lt_equity)} valueClass={tone(u.lt_equity)} />
-        <Kpi label="Unrealised ST gains (equity)" value={signedMoney(u.st_equity)} valueClass={tone(u.st_equity)} />
-        {(u.st_other || u.lt_other) ? <Kpi label="Gold / other (ST · LT)" value={`${compactMoney(u.st_other)} · ${compactMoney(u.lt_other)}`} /> : null}
-        <Kpi label="LTCG exemption left this FY" value={money(d.exemption_left)} sub={`${d.days_left_in_fy} days left in ${d.fy}`} />
-        <Kpi label="Tax if everything sold today" value={money(d.estimated_tax_if_sold_today)} hint="After set-off of losses and the LTCG exemption" />
-      </div>
-
-      <Card
-        title="Tax-free LTCG harvesting"
-        subtitle={`Sell and immediately re-buy to reset your cost basis, using up to ${money(d.harvest.headroom)} of this year's exemption. Units are taken oldest-first (FIFO), as the depository does.`}
-        pad={false}
-      >
-        {d.harvest.plan.length ? (
-          <table className="t">
-            <thead>
-              <tr>
-                <th>Holding</th>
-                <th className="num">Units to sell</th>
-                <th className="num">At price</th>
-                <th className="num">Gain booked</th>
-                <th className="num">Future tax saved</th>
-                <th className="num">Est. charges</th>
-              </tr>
-            </thead>
-            <tbody>
-              {d.harvest.plan.map((p: any) => (
-                <tr key={p.name}>
-                  <td style={{ fontWeight: 600 }}>{p.name}</td>
-                  <td className="num">{qty(p.units)}</td>
-                  <td className="num">{money(p.price, true)}</td>
-                  <td className="num pos">{money(p.gain)}</td>
-                  <td className="num">{money(p.tax_saved)}</td>
-                  <td className="num muted">{money(p.est_charges)}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td colSpan={3}>Total</td>
-                <td className="num">{money(d.harvest.total_gain)}</td>
-                <td className="num">{money(d.harvest.total_tax_saved)}</td>
-                <td />
-              </tr>
-            </tfoot>
-          </table>
-        ) : (
-          <Empty title="Nothing to harvest right now">No long-term lots currently sit on a gain, or the exemption is used up.</Empty>
-        )}
-      </Card>
-
-      <div className="grid g-2">
-        <Card title="Turning long-term soon" subtitle="Waiting before selling these lots lowers the tax rate" pad={false}>
-          {d.upcoming_lt.length ? (
-            <table className="t">
-              <thead>
-                <tr>
-                  <th>Lot</th>
-                  <th className="num">Gain</th>
-                  <th>Becomes LT</th>
-                  <th className="num">Saved by waiting</th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.upcoming_lt.map((l: any) => (
-                  <tr key={l.row}>
-                    <td>
-                      <div style={{ fontWeight: 600 }}>{l.name}</div>
-                      <div className="muted small">
-                        {qty(l.held_qty)} bought {date(l.date)} · row {l.row}
-                      </div>
-                    </td>
-                    <td className="num pos">{money(l.gain)}</td>
-                    <td>
-                      {date(l.lt_date)} <Badge tone="warn">{l.days_to_lt}d</Badge>
-                    </td>
-                    <td className="num">{money(l.tax_saved_by_waiting)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <Empty title="No lots crossing the 12-month mark soon" />
-          )}
-        </Card>
-        <Card title="Lots in loss" subtitle={`Can offset gains: ST ${money(d.loss_total.st)} · LT ${money(d.loss_total.lt)}`} pad={false}>
-          {d.loss_lots.length ? (
-            <table className="t">
-              <thead>
-                <tr>
-                  <th>Lot</th>
-                  <th>Term</th>
-                  <th className="num">Loss</th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.loss_lots.map((l: any) => (
-                  <tr key={l.row}>
-                    <td>
-                      <div style={{ fontWeight: 600 }}>{l.name}</div>
-                      <div className="muted small">
-                        {qty(l.held_qty)} @ {money(l.rate, true)} on {date(l.date)}
-                      </div>
-                    </td>
-                    <td>
-                      <Badge tone={l.term === "LT" ? "pos" : "warn"}>{l.term}</Badge>
-                    </td>
-                    <td className="num neg">
-                      {signedMoney(l.gain)} <span className="small">({pct(l.gain_pct, 1, true)})</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <Empty title="No lots are in a loss" />
-          )}
-        </Card>
-      </div>
     </div>
   );
 }

@@ -14,9 +14,10 @@ class Config:
     secret_key: bytes
     session_hours: int
     max_upload_mb: int
-    live_prices_default: bool
+    live_prices: bool
     static_dir: Path | None
     cookie_secure: bool
+    price_sync_minutes: int = 60  # default for the setting; 0 disables the background sync thread
 
     @property
     def db_path(self) -> Path:
@@ -25,6 +26,14 @@ class Config:
     @property
     def blobs_dir(self) -> Path:
         return self.data_dir / "versions"
+
+    @property
+    def mirror_dir(self) -> Path:
+        return self.data_dir / "current"
+
+    @property
+    def lock_path(self) -> Path:
+        return self.data_dir / ".sheet.lock"
 
     @property
     def uploads_dir(self) -> Path:
@@ -57,7 +66,8 @@ def load_config() -> Config:
         secret_key=key,
         session_hours=int(os.environ.get("PT_SESSION_HOURS", "168")),
         max_upload_mb=int(os.environ.get("PT_MAX_UPLOAD_MB", "15")),
-        live_prices_default=_bool(os.environ.get("PT_LIVE_PRICES"), True),
+        live_prices=_bool(os.environ.get("PT_LIVE_PRICES"), True),
         static_dir=Path(static) if static else (default_static if default_static.exists() else None),
         cookie_secure=_bool(os.environ.get("PT_COOKIE_SECURE"), False),
+        price_sync_minutes=int(os.environ.get("PT_PRICE_SYNC_MINUTES", "60")),
     )

@@ -1,8 +1,10 @@
 # Portfolio Tracker
 
-A self-hosted web app that reads broker contract notes (PDF, password-protected), adds the purchases to your Excel tracking sheet (`Invt.xlsx`) and turns that sheet into a portfolio dashboard.
+A self-hosted web app that reads broker contract notes (PDF, password-protected), adds the purchases to your Excel tracking sheet (`Invt.xlsx`) and turns that sheet into a portfolio dashboard and tax planner.
 
-The workbook is the source of truth. The app's only write is inserting new rows. It never edits existing cells, never overwrites formulas, and keeps every version of the sheet.
+The workbook is the source of truth. The app writes to it in exactly two ways:
+- **Imports** insert new rows (existing cells are never edited, formulas are never overwritten). Each import is saved as a new version.
+- **Price sync** writes live market prices into the market-rate cell of existing purchase rows and the sheet's valuation date, at startup and then every 60 minutes, so the workbook matches the app when opened on its own. Formula cells are never touched. Price writes update the current version in place instead of creating new versions.
 
 ## Run on a home server
 
@@ -24,12 +26,34 @@ The image runs the test suite while it builds, so a broken build never produces 
 |---|---|---|
 | `PT_DATA_DIR` | `/data` | Sheet versions, SQLite metadata, uploaded notes, secret key |
 | `PT_SEED_SHEET` | `/seed/Invt.xlsx` | Workbook imported as version 1 when no sheet exists (missing file = ignored) |
-| `PT_LIVE_PRICES` | `true` | Yahoo Finance quotes for display only. They are never written to the sheet |
+| `PT_LIVE_PRICES` | `true` | Live quotes (Yahoo Finance). `false` = offline: the app uses the market rates already in the sheet |
+| `PT_PRICE_SYNC_MINUTES` | `60` | Default interval for writing prices into the sheet (also editable in Settings). `0` disables the background sync |
 | `PT_COOKIE_SECURE` | `false` | Set to `true` behind an HTTPS reverse proxy |
 | `PT_MAX_UPLOAD_MB` | `15` | Size limit per uploaded file |
 | `PT_SESSION_HOURS` | `168` | Login session lifetime |
 | `PUID` / `PGID` | `10001` | User the app runs as |
 | `PT_SECRET_KEY` | generated | Overrides `data/secret.key`, which signs sessions and encrypts the saved PDF password |
+
+### Getting the latest sheet from a terminal
+
+`data/current/Invt.xlsx` is always an exact copy of the current version. It is replaced atomically on every import, restore, upload and price write, so it is never half-written. It's a read-only mirror: edits to it are ignored; upload edited sheets via **Sheet history → Upload edited sheet**.
+
+```bash
+# on the server, or from another machine
+scp server:portfolio-tracker/data/current/Invt.xlsx .
+
+# over HTTP (works from anywhere the app is reachable)
+curl -s -c pt.jar -H 'Content-Type: application/json' -H 'X-Requested-With: portfolio-tracker' \
+     -d '{"password":"YOUR_APP_PASSWORD"}' http://server:8000/api/auth/login
+curl -s -b pt.jar -OJ http://server:8000/api/sheet/download        # saves Invt_v<N>.xlsx
+curl -s -b pt.jar -OJ http://server:8000/api/versions/3/download    # any older version
+```
+
+Don't take files from `data/versions/`. They are named by content hash, and the current one is recorded only in the database.
+
+### Storage
+
+Versions are kept indefinitely. Each one is a full copy of the workbook (about 20 KB for this sheet) and identical content is stored once. Price writes don't add versions, and the replaced file is deleted. Ten years of three imports a week is roughly 1,600 versions, about 35 MB, plus the uploaded PDFs (about 50 KB each).
 
 Back up the whole `data/` directory. If `secret.key` is lost, the saved PDF password can't be decrypted (you just enter it again), and everyone has to sign in again.
 

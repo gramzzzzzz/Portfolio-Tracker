@@ -209,3 +209,17 @@ class AppendResult:
     rows: list[PlannedRow]
     checks: list[dict[str, Any]]
     warnings: list[str]
+
+
+@dataclass
+class PriceUpdateResult:
+    """Outcome of refreshing market rates in the sheet."""
+
+    changed: bool
+    updated_rows: list[int]
+    unchanged_rows: list[int]
+    skipped_formula_rows: list[int]  # market-rate cell holds a formula -> never overwritten
+    missing: list[str]  # holdings without a price
+    valuation_cell: str | None
+    valuation_date: dt.date | None
+    checks: list[dict[str, Any]]

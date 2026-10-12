@@ -225,7 +225,7 @@ class ImportService:
         return p
 
     def _hints(self, t: Trade, sectors: list[str]) -> dict:
-        if not self.settings.get("live_prices"):
+        if self.prices.provider is None:
             return {}
         cands = self.prices.resolve(t.isin)
         if not cands:

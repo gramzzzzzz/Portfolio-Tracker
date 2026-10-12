@@ -8,7 +8,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Protocol, runtime_checkable
 
-from app.domain.models import AppendResult, ContractNote, NewLot, SheetSnapshot
+from app.domain.models import AppendResult, ContractNote, NewLot, PriceUpdateResult, SheetSnapshot
 
 
 class LayoutError(Exception):
@@ -31,6 +31,12 @@ class PortfolioSheetDAO(Protocol):
     def append(self, data: bytes, lots: list[NewLot], *, dry_run: bool = False) -> tuple[bytes | None, AppendResult]:
         """Insert rows for ``lots``. Returns the new workbook bytes (None when dry_run)
         and a description of every row added plus verification results."""
+
+    def update_prices(self, data: bytes, prices: dict[str, float], as_of: dt.date | None
+                      ) -> tuple[bytes | None, PriceUpdateResult]:
+        """Write current market rates into the market-rate input cells of EXISTING purchase
+        rows (and the sheet's valuation date). Never touches formulas or adds rows.
+        Returns None bytes when nothing changed."""
 
 
 @runtime_checkable

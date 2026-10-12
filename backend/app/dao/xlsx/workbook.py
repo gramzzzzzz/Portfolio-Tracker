@@ -126,6 +126,15 @@ class Workbook:
             out[s.get("name")] = rels[rid][1]
         return out
 
+    def mark_full_calc(self) -> None:
+        """Ask Excel / LibreOffice to recalculate every formula when the file is opened."""
+        wbroot = self._tree("xl/workbook.xml").getroot()
+        calc = wbroot.find("m:calcPr", N)
+        if calc is None:
+            calc = etree.SubElement(wbroot, q("calcPr"))
+        calc.set("fullCalcOnLoad", "1")
+        self._touch("xl/workbook.xml")
+
     def sheet_names(self) -> list[str]:
         return list(self.sheet_paths)
 
@@ -444,12 +453,7 @@ class Sheet:
                 nt = refs.shift_formula(dn.text, spec, own_sheet=own or "\0", target_sheet=self.name)
                 if nt != dn.text:
                     dn.text = nt
-        # force full recalculation when opened in Excel / LibreOffice
-        calc = wbroot.find("m:calcPr", N)
-        if calc is None:
-            calc = etree.SubElement(wbroot, q("calcPr"))
-        calc.set("fullCalcOnLoad", "1")
-        wb._touch("xl/workbook.xml")
+        wb.mark_full_calc()
         self._drop_calc_chain()
         self.wb._touch(self.path)
 

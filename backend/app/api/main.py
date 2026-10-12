@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import logging
+from contextlib import asynccontextmanager
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -17,7 +19,9 @@ from app.api.auth import COOKIE, make_token, require_session, verify_token
 from app.config import Config, load_config
 from app.container import Container, build
 from app.dao.base import LayoutError
+from app.services.finance import fy_label
 from app.services.import_service import ImportError_
+from app.services.sheet_lock import LockTimeout
 from app.services.version_service import ConflictError, NoSheetError
 
 log = logging.getLogger("portfolio")
@@ -54,10 +58,46 @@ class SymbolIn(BaseModel):
     symbol: str | None = Field(default=None, max_length=40)
 
 
+class SaleIn(BaseModel):
+    name: str = Field(max_length=120)
+    units: float | None = Field(default=None, gt=0)
+    amount: float | None = Field(default=None, gt=0)
+    sale_date: dt.date | None = None
+    price: float | None = Field(default=None, gt=0)
+
+
+class RaiseCashIn(BaseModel):
+    amount: float = Field(gt=0, le=1e10)
+    exclude: list[str] = []
+
+
+class WithdrawalIn(BaseModel):
+    monthly_amount: float = Field(gt=0, le=1e9)
+    months: int = Field(ge=1, le=600)
+    annual_return_pct: float = Field(default=10.0, ge=-50, le=50)
+    start: dt.date | None = None
+    exclude: list[str] = []
+
+
+class RealisedIn(BaseModel):
+    st_equity: float = 0.0
+    lt_equity: float = 0.0
+    st_slab: float = 0.0
+    lt_other: float = 0.0
+
+
 def create_app(config: Config | None = None, container: Container | None = None) -> FastAPI:
     config = config or load_config()
     c = container or build(config)
-    app = FastAPI(title="Portfolio Tracker", version="1.0.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    @asynccontextmanager
+    async def lifespan(_app):
+        if config.price_sync_minutes > 0:
+            c.price_sync.start()  # runs at startup, then every `price_sync_minutes`
+        yield
+        c.price_sync.stop()
+
+    app = FastAPI(title="Portfolio Tracker", version="1.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json",
+                  lifespan=lifespan)
     app.state.container = c
     max_bytes = config.max_upload_mb * 1024 * 1024
 
@@ -76,6 +116,10 @@ def create_app(config: Config | None = None, container: Container | None = None)
     @app.exception_handler(ConflictError)
     async def _conf(_req, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc), "code": "conflict"})
+
+    @app.exception_handler(LockTimeout)
+    async def _busy(_req, exc):
+        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "busy"})
 
     @app.exception_handler(KeyError)
     async def _nf(_req, exc):
@@ -155,20 +199,59 @@ def create_app(config: Config | None = None, container: Container | None = None)
     # ============================================================ protected
     api = APIRouter(prefix="/api", dependencies=[Depends(require_session)])
 
-    def live_flag(live: bool | None) -> bool:
-        return c.settings.get("live_prices") if live is None else (live and c.settings.get("live_prices"))
-
-    # -------- portfolio
+    # -------- portfolio (always valued at live prices; falls back to the last synced rate)
     @api.get("/portfolio/overview")
-    def overview(live: bool | None = None):
+    def overview():
         snap = c.versions.snapshot()
-        out = c.analytics.overview(snap, live_flag(live))
+        out = c.analytics.overview(snap)
         out["meta"]["version"] = c.versions.head()
+        out["meta"]["price_sync"] = c.price_sync.status()
         return out
 
-    @api.get("/portfolio/tax")
-    def tax(live: bool | None = None):
-        return c.analytics.tax(c.versions.snapshot(), live_flag(live))
+    # -------- tax planning
+    @api.get("/tax/summary")
+    def tax_summary():
+        return c.tax.summary(c.versions.snapshot())
+
+    @api.post("/tax/simulate-sale")
+    def tax_simulate(body: SaleIn):
+        try:
+            return c.tax.simulate_sale(c.versions.snapshot(), body.name, units=body.units, amount=body.amount,
+                                       sale_date=body.sale_date, price=body.price)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.post("/tax/raise-cash")
+    def tax_raise_cash(body: RaiseCashIn):
+        try:
+            return c.tax.raise_cash(c.versions.snapshot(), body.amount, body.exclude)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.post("/tax/withdrawal-plan")
+    def tax_withdrawals(body: WithdrawalIn):
+        try:
+            return c.tax.withdrawal_plan(c.versions.snapshot(), body.monthly_amount, body.months,
+                                         body.annual_return_pct, body.start, body.exclude)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.put("/tax/realised")
+    def tax_realised(body: RealisedIn):
+        today = dt.date.today()
+        c.settings.update({"realized_fy": fy_label(today), "realized_stcg_fy": body.st_equity,
+                           "realized_ltcg_fy": body.lt_equity, "realized_st_other_fy": body.st_slab,
+                           "realized_lt_other_fy": body.lt_other})
+        return c.tax.summary(c.versions.snapshot())
+
+    # -------- price sync
+    @api.get("/prices/sync")
+    def price_sync_status():
+        return c.price_sync.status()
+
+    @api.post("/prices/sync")
+    def price_sync_now():
+        return c.price_sync.run_once("manual")
 
     @api.get("/portfolio/charges")
     def charges():

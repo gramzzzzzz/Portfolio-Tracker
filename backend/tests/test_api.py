@@ -1,6 +1,8 @@
 """End-to-end flow through the HTTP API with the real sample files."""
 import io
 
+import pytest
+
 import openpyxl
 
 
@@ -91,8 +93,8 @@ def test_full_import_flow(app_client, sheet_bytes, note_bytes, encrypted_note):
 
     # analytics endpoints work offline from sheet prices
     ov = c.get("/api/portfolio/overview").json()
-    assert ov["meta"]["price_source"] == "sheet" and ov["kpis"]["holdings"] == 1
-    assert c.get("/api/portfolio/tax").status_code == 200
+    assert ov["meta"]["price_source"] == "last_sync" and ov["kpis"]["holdings"] == 1
+    assert c.get("/api/tax/summary").status_code == 200
     assert c.get("/api/portfolio/charges").status_code == 200
 
 
@@ -119,3 +121,32 @@ def test_bad_uploads(app_client):
     assert r.status_code == 415
     r = app_client.post("/api/imports", files=[("files", ("x.pdf", b"PK...", "application/pdf"))])
     assert r.status_code == 415
+
+
+def test_tax_endpoints(app_client, sheet_bytes):
+    c = app_client
+    login(c)
+    upload_sheet(c, sheet_bytes)
+    s = c.get("/api/tax/summary").json()
+    assert s["fy"].startswith("FY") and s["position"]["computation"]["steps"]
+    lot = s["lots"][0]
+    assert lot["name"] == "SBI ETF GOLD" and lot["tax_class"] == "non_equity"
+    assert lot["bucket"] in ("st_slab", "lt_other") and lot["stt_buy"] == 0  # ETF: no purchase STT
+    ov = c.get("/api/portfolio/overview").json()
+    assert "after_tax_value" in ov["kpis"] and "tax_if_sold" in ov["holdings"][0]
+
+    sim = c.post("/api/tax/simulate-sale", json={"name": "SBI ETF GOLD", "units": 10}).json()
+    assert sim["units"] == 10 and sim["net"] == pytest.approx(sim["proceeds"] - sim["expenses"] - sim["stt"] - sim["tax"])
+    by_amount = c.post("/api/tax/simulate-sale", json={"name": "SBI ETF GOLD", "amount": 1000}).json()
+    assert by_amount["units"] == 9  # floor(1000 / 101.68)
+    assert c.post("/api/tax/simulate-sale", json={"name": "SBI ETF GOLD", "units": 1000}).status_code == 422
+    assert c.post("/api/tax/simulate-sale", json={"name": "NOPE", "units": 1}).status_code == 422
+
+    rc = c.post("/api/tax/raise-cash", json={"amount": 2000}).json()
+    assert rc["achieved_net"] >= 2000 and rc["holdings"][0]["name"] == "SBI ETF GOLD"
+    wp = c.post("/api/tax/withdrawal-plan", json={"monthly_amount": 1000, "months": 12, "annual_return_pct": 0}).json()
+    assert wp["months_funded"] == 6 and wp["depleted_on"]  # ~6,100 of value / 1,000 a month
+
+    s2 = c.put("/api/tax/realised", json={"st_equity": 5000, "lt_equity": 0, "st_slab": 0, "lt_other": 0}).json()
+    assert s2["realised"]["current"] and s2["realised_tax"]["total"] == pytest.approx(5000 * 0.2 * 1.04)
+    assert c.get("/api/prices/sync").json()["enabled"] is False

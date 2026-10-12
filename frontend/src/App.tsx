@@ -1,12 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { NavLink, Navigate, Outlet, Route, Routes, useNavigate } from "react-router-dom";
-import { api, download, type Version } from "./api";
+import { api, download, type PriceSync, type Version } from "./api";
 import { Icon, Spinner, useToast, type IconName } from "./components/ui";
-import { dateTime } from "./format";
+import { dateTime, timeAgo } from "./format";
 import Dashboard from "./pages/Dashboard";
 import Holdings from "./pages/Holdings";
 import ImportPage from "./pages/Import";
 import Insights from "./pages/Insights";
+import TaxPlanner from "./pages/TaxPlanner";
 import History from "./pages/History";
 import SettingsPage from "./pages/Settings";
 import Login from "./pages/Login";
@@ -15,10 +16,9 @@ import Onboarding from "./pages/Onboarding";
 // --------------------------------------------------------------- app context
 interface AppState {
   head: Version | null | undefined; // undefined = loading, null = no sheet yet
-  live: boolean;
-  setLive: (v: boolean) => void;
-  liveAllowed: boolean;
+  sync: PriceSync | null;
   refreshHead: () => Promise<void>;
+  syncNow: () => Promise<PriceSync>;
   epoch: number; // bumps whenever the sheet changes -> pages refetch
 }
 const Ctx = createContext<AppState>(null as unknown as AppState);
@@ -26,23 +26,27 @@ export const useApp = () => useContext(Ctx);
 
 function AppProvider({ children }: { children: ReactNode }) {
   const [head, setHead] = useState<Version | null | undefined>(undefined);
+  const [sync, setSync] = useState<PriceSync | null>(null);
   const [epoch, setEpoch] = useState(0);
-  const [liveAllowed, setLiveAllowed] = useState(true);
-  const [live, setLiveState] = useState(() => localStorage.getItem("pt.live") !== "0");
   const refreshHead = useCallback(async () => {
     const vs = await api.get<Version[]>("/api/versions");
     setHead(vs.find((v) => v.is_head) || null);
     setEpoch((e) => e + 1);
   }, []);
+  const loadSync = useCallback(() => api.get<PriceSync>("/api/prices/sync").then(setSync).catch(() => {}), []);
+  const syncNow = useCallback(async () => {
+    const st = await api.send<PriceSync>("POST", "/api/prices/sync");
+    setSync(st);
+    await refreshHead();
+    return st;
+  }, [refreshHead]);
   useEffect(() => {
     refreshHead().catch(() => setHead(null));
-    api.get<{ live_prices: boolean }>("/api/settings").then((s) => setLiveAllowed(s.live_prices)).catch(() => {});
-  }, [refreshHead]);
-  const setLive = (v: boolean) => {
-    localStorage.setItem("pt.live", v ? "1" : "0");
-    setLiveState(v);
-  };
-  return <Ctx.Provider value={{ head, live: live && liveAllowed, setLive, liveAllowed, refreshHead, epoch }}>{children}</Ctx.Provider>;
+    loadSync();
+    const t = setInterval(loadSync, 60_000); // keep "written to sheet …" fresh
+    return () => clearInterval(t);
+  }, [refreshHead, loadSync]);
+  return <Ctx.Provider value={{ head, sync, refreshHead, syncNow, epoch }}>{children}</Ctx.Provider>;
 }
 
 // --------------------------------------------------------------- shell
@@ -50,13 +54,15 @@ const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/", label: "Dashboard", icon: "dashboard" },
   { to: "/holdings", label: "Holdings", icon: "holdings" },
   { to: "/import", label: "Import notes", icon: "upload" },
+  { to: "/tax", label: "Tax planner", icon: "tax" },
   { to: "/insights", label: "Insights", icon: "insights" },
   { to: "/history", label: "Sheet history", icon: "history" },
   { to: "/settings", label: "Settings", icon: "settings" },
 ];
 
 function Shell() {
-  const { head, live, setLive, liveAllowed } = useApp();
+  const { head, sync, syncNow } = useApp();
+  const [syncing, setSyncing] = useState(false);
   const nav = useNavigate();
   const toast = useToast();
   if (head === undefined) return <Spinner />;
@@ -100,16 +106,21 @@ function Shell() {
             </span>
           </div>
           <div className="row">
-            {liveAllowed && (
-              <div className="seg" role="group" aria-label="Price source">
-                <button aria-pressed={!live} onClick={() => setLive(false)} title="Use the market rates typed in the sheet">
-                  Sheet prices
-                </button>
-                <button aria-pressed={live} onClick={() => setLive(true)} title="Use live market quotes (display only, never written to the sheet)">
-                  Live prices
-                </button>
-              </div>
-            )}
+            <PriceStatus
+              sync={sync}
+              busy={syncing}
+              onSync={async () => {
+                setSyncing(true);
+                try {
+                  const st = await syncNow();
+                  toast(st.result === "written" ? `Market rates written to the sheet (${st.rows_updated} rows)` : st.result === "unchanged" ? "Sheet already has the latest prices" : st.detail || "Price sync finished");
+                } catch (e) {
+                  toast((e as Error).message, "neg");
+                } finally {
+                  setSyncing(false);
+                }
+              }}
+            />
             <button
               className="btn sm"
               onClick={() => {
@@ -129,6 +140,24 @@ function Shell() {
         </main>
       </div>
     </div>
+  );
+}
+
+function PriceStatus({ sync, busy, onSync }: { sync: PriceSync | null; busy: boolean; onSync: () => void }) {
+  if (!sync) return null;
+  if (!sync.enabled) return <span className="badge warn" title="Live prices are disabled on the server (PT_LIVE_PRICES=false)">Offline: sheet rates</span>;
+  const err = sync.result === "error" || sync.result === "no_quotes";
+  const title = `Live prices on every page. Market rates are written into the sheet every ${sync.interval_minutes} min` +
+    (sync.last_write ? `; last written ${dateTime(sync.last_write)}` : "") + (sync.detail ? ` — ${sync.detail}` : "");
+  return (
+    <span className="row small" style={{ gap: 6 }} title={title}>
+      <span className={`dot ${err ? "neg" : "pos"}`} aria-hidden />
+      <span>Live prices</span>
+      <span className="muted">· sheet updated {sync.last_write ? timeAgo(sync.last_write) : "—"}</span>
+      <button className="btn ghost sm" onClick={onSync} disabled={busy} aria-label="Write latest prices to the sheet now">
+        <Icon name="refresh" />
+      </button>
+    </span>
   );
 }
 
@@ -164,6 +193,7 @@ export default function App() {
         <Route path="holdings" element={<Holdings />} />
         <Route path="import" element={<ImportPage />} />
         <Route path="import/:batchId" element={<ImportPage />} />
+        <Route path="tax" element={<TaxPlanner />} />
         <Route path="insights" element={<Insights />} />
         <Route path="history" element={<History />} />
         <Route path="settings" element={<SettingsPage />} />

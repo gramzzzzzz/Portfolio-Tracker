@@ -12,31 +12,43 @@ from cryptography.fernet import Fernet, InvalidToken
 from app.dao.repo.sqlite_repo import Repository
 
 DEFAULTS: dict[str, Any] = {
-    "live_prices": True,
     "benchmark_symbol": "^NSEI",
+    "price_sync_minutes": 60,
     "max_holding_pct": 20.0,
     "max_sector_pct": 35.0,
+    # ---- tax (FY 2026-27 rates; editable)
     "stcg_rate_pct": 20.0,
     "ltcg_rate_pct": 12.5,
     "ltcg_exemption": 125000.0,
     "slab_rate_pct": 30.0,
-    "realized_ltcg_fy": 0.0,
+    "surcharge_pct": 0.0,
+    "cess_pct": 4.0,
+    # gains already booked in the FY named by realized_fy (ignored once that FY is over)
+    "realized_fy": "",
     "realized_stcg_fy": 0.0,
+    "realized_ltcg_fy": 0.0,
+    "realized_st_other_fy": 0.0,
+    "realized_lt_other_fy": 0.0,
+    # ---- selling costs: None = derive from imported contract notes
+    "sell_expense_pct": None,
+    "dp_charge_per_sale": 0.0,
     "upcoming_lt_window_days": 60,
     # sector -> tax class: equity | non_equity (gold/silver ETFs, intl funds) | debt
     "tax_class_by_sector": {},
     # sector -> block heading in the main area, overrides automatic mapping
     "sector_block_overrides": {},
 }
+_NULLABLE = {"sell_expense_pct"}
+_SIGNED = {"realized_stcg_fy", "realized_ltcg_fy", "realized_st_other_fy", "realized_lt_other_fy"}  # losses allowed
 
-_NUMERIC = {k for k, v in DEFAULTS.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+_NUMERIC = {k for k, v in DEFAULTS.items() if isinstance(v, (int, float)) and not isinstance(v, bool)} | _NULLABLE
 
 
 class SettingsService:
-    def __init__(self, repo: Repository, secret_key: bytes, live_default: bool = True):
+    def __init__(self, repo: Repository, secret_key: bytes, price_sync_minutes: int = 60):
         self.repo = repo
         self._fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(b"pdf-pw:" + secret_key).digest()))
-        self._defaults = dict(DEFAULTS, live_prices=live_default)
+        self._defaults = dict(DEFAULTS, price_sync_minutes=price_sync_minutes)
 
     def all(self) -> dict[str, Any]:
         stored = self.repo.get("settings", {}) or {}
@@ -53,10 +65,17 @@ class SettingsService:
         for k, v in patch.items():
             if k not in self._defaults:
                 raise ValueError(f"Unknown setting '{k}'")
-            if k in _NUMERIC:
-                v = float(v)
-                if v < 0:
+            if k in _NULLABLE and (v is None or v == ""):
+                v = None
+            elif k in _NUMERIC:
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    raise ValueError(f"'{k}' must be a number") from None
+                if v < 0 and k not in _SIGNED:
                     raise ValueError(f"'{k}' must be >= 0")
+                if k == "price_sync_minutes" and v < 5:
+                    raise ValueError("Price sync interval must be at least 5 minutes")
             elif isinstance(self._defaults[k], bool):
                 v = bool(v)
             elif isinstance(self._defaults[k], dict):

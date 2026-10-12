@@ -4,11 +4,11 @@ import { useApp } from "../App";
 import { Alert, Badge, Card, Icon, Spinner, useAsync, useToast } from "../components/ui";
 import { date, money, pct, qty, signedMoney, tone } from "../format";
 
-type Key = "name" | "value" | "invested" | "gain" | "gain_pct" | "xirr" | "weight" | "sector";
+type Key = "name" | "value" | "invested" | "gain" | "gain_pct" | "xirr" | "weight" | "sector" | "after_tax_gain";
 
 export default function Holdings() {
-  const { live, epoch } = useApp();
-  const { data, error, loading, reload } = useAsync(() => api.get<Overview>(`/api/portfolio/overview?live=${live}`), [live, epoch]);
+  const { epoch } = useApp();
+  const { data, error, loading, reload } = useAsync(() => api.get<Overview>("/api/portfolio/overview"), [epoch]);
   const [sort, setSort] = useState<{ key: Key; dir: 1 | -1 }>({ key: "value", dir: -1 });
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<string | null>(null);
@@ -37,7 +37,7 @@ export default function Holdings() {
       {sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : ""}
     </th>
   );
-  const tot = rows.reduce((a, h) => ({ v: a.v + h.value, i: a.i + h.invested }), { v: 0, i: 0 });
+  const tot = rows.reduce((a, h) => ({ v: a.v + h.value, i: a.i + h.invested, at: a.at + (h.after_tax_gain ?? 0) }), { v: 0, i: 0, at: 0 });
 
   return (
     <div className="stack">
@@ -69,6 +69,7 @@ export default function Holdings() {
                 {th("invested", "Invested")}
                 {th("value", "Value")}
                 {th("gain", "P&L")}
+                {th("after_tax_gain", "After tax")}
                 {th("xirr", "XIRR")}
                 {th("weight", "Weight")}
               </tr>
@@ -99,7 +100,7 @@ export default function Holdings() {
                         {h.price_source === "live" ? (
                           <span className={tone(h.day_change_pct)}>{pct(h.day_change_pct, 2, true)} today</span>
                         ) : (
-                          <span className="muted">sheet rate</span>
+                          <span className="muted">last synced</span>
                         )}
                       </div>
                     </td>
@@ -108,6 +109,10 @@ export default function Holdings() {
                     <td className={`num ${tone(h.gain)}`}>
                       {signedMoney(h.gain)}
                       <div className="small">{pct(h.gain_pct, 1, true)}</div>
+                    </td>
+                    <td className={`num ${tone(h.after_tax_gain)}`} title={h.tax_if_sold !== undefined ? `If sold today: tax ${money(h.tax_if_sold)}, STT & charges ${money(h.exit_costs)}` : undefined}>
+                      {signedMoney(h.after_tax_gain)}
+                      <div className="small muted">tax {money(h.tax_if_sold)}</div>
                     </td>
                     <td className={`num ${tone(h.xirr)}`} title={h.xirr === null ? "Not annualised: held for less than a year" : undefined}>{pct(h.xirr, 1, true)}</td>
                     <td className="num">{pct(h.weight, 1)}</td>
@@ -122,6 +127,9 @@ export default function Holdings() {
                 <td className="num">{money(tot.i)}</td>
                 <td className="num">{money(tot.v)}</td>
                 <td className={`num ${tone(tot.v - tot.i)}`}>{signedMoney(tot.v - tot.i)}</td>
+                <td className={`num ${tone(tot.at)}`} title="Sum of selling each holding on its own; selling everything together can differ slightly (set-off and the exemption are shared)">
+                  {signedMoney(tot.at)}
+                </td>
                 <td colSpan={2} />
               </tr>
             </tfoot>
@@ -143,7 +151,7 @@ function LotRows({ h, onSymbol }: { h: Holding; onSymbol: () => void }) {
   return (
     <>
       <tr className="sub">
-        <td colSpan={10}>
+        <td colSpan={11}>
           <div className="row small">
             <span className="muted">Sheet rows {h.rows.join(", ")}</span>
             {h.high52 && (
@@ -163,7 +171,7 @@ function LotRows({ h, onSymbol }: { h: Holding; onSymbol: () => void }) {
         </td>
       </tr>
       <tr className="sub">
-        <td colSpan={10} style={{ padding: 0 }}>
+        <td colSpan={11} style={{ padding: 0 }}>
           <table className="t">
             <thead>
               <tr>

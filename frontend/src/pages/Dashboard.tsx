@@ -6,8 +6,8 @@ import { Alert, Badge, Bar, Card, Empty, Kpi, PALETTE, Spinner, useAsync } from 
 import { compactMoney, date, money, pct, signedMoney, tone } from "../format";
 
 export default function Dashboard() {
-  const { live, epoch } = useApp();
-  const { data, error, loading } = useAsync(() => api.get<Overview>(`/api/portfolio/overview?live=${live}`), [live, epoch]);
+  const { epoch } = useApp();
+  const { data, error, loading } = useAsync(() => api.get<Overview>("/api/portfolio/overview"), [epoch]);
   if (loading && !data) return <Spinner label="Reading the sheet" />;
   if (error) return <Alert tone="neg" title="Could not load the portfolio">{error.message}</Alert>;
   if (!data) return null;
@@ -30,8 +30,9 @@ export default function Dashboard() {
         <div>
           <h1>Dashboard</h1>
           <p>
-            Valued with {meta.price_source === "live" ? `live quotes (${meta.live_coverage ?? 0}% of holdings)` : `sheet market rates`} as of {date(meta.as_of)}
-            {meta.price_source === "sheet" && meta.valuation_date && ` · sheet rates dated ${date(meta.valuation_date)}`}
+            {meta.price_source === "live"
+              ? `Valued at live prices${meta.live_coverage !== null && meta.live_coverage < 100 ? ` (${meta.live_coverage}% of holdings; the rest at their last synced price)` : ""}`
+              : `Live quotes unavailable right now — valued at the last prices written to the sheet (${date(meta.valuation_date)})`}
           </p>
         </div>
       </div>
@@ -51,7 +52,16 @@ export default function Dashboard() {
       <div className="grid g-kpi">
         <Kpi label="Current value" value={money(kpis.value)} sub={`${kpis.holdings} holdings · ${kpis.lots} purchases`} />
         <Kpi label="Invested" value={money(kpis.invested)} sub={`incl. ${money(kpis.charges)} charges`} />
-        <Kpi label="Unrealised P&L" value={signedMoney(kpis.gain)} valueClass={tone(kpis.gain)} sub={pct(kpis.gain_pct, 2, true)} />
+        <Kpi label="Unrealised P&L (pre-tax)" value={signedMoney(kpis.gain)} valueClass={tone(kpis.gain)} sub={pct(kpis.gain_pct, 2, true)} />
+        {kpis.after_tax_gain !== undefined && (
+          <Kpi
+            label="P&L after tax & exit costs"
+            hint="If everything were sold today: STCG/LTCG after set-off and the LTCG exemption, plus cess, STT and selling charges"
+            value={signedMoney(kpis.after_tax_gain)}
+            valueClass={tone(kpis.after_tax_gain)}
+            sub={<Link to="/tax">{`tax ${money(kpis.tax_if_sold)} · costs ${money(kpis.exit_costs)}`}</Link>}
+          />
+        )}
         <Kpi
           label="XIRR"
           hint="Annualised return that accounts for when each purchase was made"

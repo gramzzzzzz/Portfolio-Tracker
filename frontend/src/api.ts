@@ -127,6 +127,23 @@ export interface Holding {
   from_high_pct: number | null;
   rows: number[];
   lot_details: LotDetail[];
+  tax_if_sold?: number;
+  exit_costs?: number;
+  after_tax_value?: number;
+  after_tax_gain?: number;
+}
+
+export interface PriceSync {
+  enabled: boolean;
+  interval_minutes: number;
+  last_run?: number;
+  last_write?: number;
+  result?: "written" | "unchanged" | "error" | "no_quotes" | "no_sheet" | "disabled";
+  detail?: string;
+  rows_updated?: number;
+  missing?: string[];
+  valuation_date?: string;
+  valuation_cell?: string;
 }
 
 export interface AllocRow {
@@ -140,8 +157,9 @@ export interface AllocRow {
 export interface Overview {
   meta: {
     valuation_date: string | null;
-    price_source: "live" | "sheet";
+    price_source: "live" | "last_sync";
     live_coverage: number | null;
+    price_sync: PriceSync;
     as_of: string;
     sheet_name: string;
     version: Version;
@@ -159,6 +177,11 @@ export interface Overview {
     charges: number;
     charges_pct: number | null;
     sheet_grand_total: number | null;
+    tax_if_sold?: number;
+    exit_costs?: number;
+    after_tax_value?: number;
+    after_tax_gain?: number;
+    after_tax_gain_pct?: number | null;
   };
   holdings: Holding[];
   allocation: { sector: AllocRow[]; block: AllocRow[]; asset_class: AllocRow[] };
@@ -253,16 +276,23 @@ export interface Batch {
 }
 
 export interface Settings {
-  live_prices: boolean;
   benchmark_symbol: string;
+  price_sync_minutes: number;
   max_holding_pct: number;
   max_sector_pct: number;
   stcg_rate_pct: number;
   ltcg_rate_pct: number;
   ltcg_exemption: number;
   slab_rate_pct: number;
-  realized_ltcg_fy: number;
+  surcharge_pct: number;
+  cess_pct: number;
+  realized_fy: string;
   realized_stcg_fy: number;
+  realized_ltcg_fy: number;
+  realized_st_other_fy: number;
+  realized_lt_other_fy: number;
+  sell_expense_pct: number | null;
+  dp_charge_per_sale: number;
   upcoming_lt_window_days: number;
   tax_class_by_sector: Record<string, string>;
   sector_block_overrides: Record<string, string>;

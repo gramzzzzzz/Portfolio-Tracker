@@ -36,5 +36,10 @@ class BlobStore:
             raise ValueError("bad blob id")
         return self.path(sha).read_bytes()
 
+    def delete(self, sha: str) -> None:
+        p = self.path(sha)
+        if p.exists():
+            p.unlink()
+
     def path(self, sha: str) -> Path:
         return self.root / f"{sha}{self.suffix}"

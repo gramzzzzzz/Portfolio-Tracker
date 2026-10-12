@@ -106,6 +106,14 @@ class Repository:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Additive, idempotent schema migrations for databases created by older versions."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(versions)")}
+        if "prices_at" not in cols:
+            # time of the last in-place market-price refresh of this version (not a new version)
+            self._conn.execute("ALTER TABLE versions ADD COLUMN prices_at REAL")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -162,6 +170,14 @@ class Repository:
     def version(self, vid: int) -> dict | None:
         rows = self._q("SELECT * FROM versions WHERE id=?", (vid,))
         return self._version(rows[0]) if rows else None
+
+    def update_version_content(self, vid: int, sha256: str, size: int, prices_at: float) -> None:
+        """Replace the content of a version in place (used only for market-price refreshes of
+        HEAD, which the owner chose not to version)."""
+        self._x("UPDATE versions SET sha256=?, size=?, prices_at=? WHERE id=?", (sha256, size, prices_at, vid))
+
+    def sha_in_use(self, sha256: str) -> bool:
+        return bool(self._q("SELECT 1 FROM versions WHERE sha256=? LIMIT 1", (sha256,)))
 
     @staticmethod
     def _version(r: sqlite3.Row) -> dict:

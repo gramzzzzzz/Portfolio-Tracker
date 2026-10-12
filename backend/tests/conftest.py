@@ -45,7 +45,7 @@ def app_client(tmp_path):
     from app.container import build
 
     cfg = Config(data_dir=tmp_path, seed_sheet=None, secret_key=b"test-key", session_hours=1, max_upload_mb=5,
-                 live_prices_default=False, static_dir=None, cookie_secure=False)
+                 live_prices=False, static_dir=None, cookie_secure=False, price_sync_minutes=0)
     container = build(cfg, price_provider=None)
     app = create_app(cfg, container)
     client = TestClient(app)

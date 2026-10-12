@@ -37,3 +37,12 @@ export const dateTime = (epochSeconds: number) =>
 export const tone = (v: number | null | undefined) => (v === null || v === undefined || v === 0 ? "" : v > 0 ? "pos" : "neg");
 
 export const bytes = (n: number) => (n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
+
+export const timeAgo = (epochSeconds: number) => {
+  const m = Math.round((Date.now() / 1000 - epochSeconds) / 60);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return dateTime(epochSeconds);
+};

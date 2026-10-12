@@ -1,7 +1,8 @@
 """Portfolio analytics computed from the sheet snapshot (+ optional live prices).
 
-All numbers are derived from the sheet's input columns (qty, rate, charges, dates, market
-rate, held qty) so they are always consistent with what Excel computes.
+All numbers are derived from the sheet's input columns (qty, rate, charges, dates, held qty)
+and valued at live prices. If a live quote is unavailable for a holding, its market rate in
+the sheet is used - which is the last live price the price sync wrote there.
 """
 from __future__ import annotations
 
@@ -11,9 +12,12 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 
+from app.dao.repo.sqlite_repo import Repository
 from app.domain.models import Lot, SheetSnapshot
-from app.services.finance import add_months, fy_bounds, fy_label
+from app.services.finance import add_months, fy_label
 from app.services.finance import xirr as _raw_xirr
+from app.services.prices_service import PriceService
+from app.services.settings_service import SettingsService
 
 MIN_XIRR_DAYS = 365  # annualising shorter periods produces misleading numbers
 
@@ -23,9 +27,6 @@ def xirr(flows):
     if not ds or (max(ds) - min(ds)).days < MIN_XIRR_DAYS:
         return None
     return _raw_xirr(flows)
-from app.services.prices_service import PriceService
-from app.services.settings_service import SettingsService
-from app.dao.repo.sqlite_repo import Repository
 
 
 def _r(x, n=2):
@@ -73,13 +74,18 @@ class AnalyticsService:
         self.repo = repo
         self.prices = prices
         self.settings = settings
+        self.tax = None  # TaxService, attached by the container (post-tax figures)
+
+    def attach_tax(self, tax) -> None:
+        self.tax = tax
 
     # ------------------------------------------------------------- pricing
-    def _price_lots(self, snap: SheetSnapshot, live: bool, today: dt.date):
+    def price_lots(self, snap: SheetSnapshot, today: dt.date | None = None):
+        today = today or dt.date.today()
         cfg = self.settings.all()
         names = sorted({l.name for l in snap.lots})
         quotes, symbols = {}, {}
-        if live:
+        if self.prices.provider is not None:
             codes = {}
             for l in snap.lots:
                 codes.setdefault(l.name, l.code)
@@ -91,7 +97,7 @@ class AnalyticsService:
             if q:
                 price, src = q["price"], "live"
             else:
-                price, src = l.market_rate, "sheet"
+                price, src = l.market_rate, "last_sync"
             value = (price or 0.0) * l.held_qty
             lt_date = add_months(l.date, 12) if l.date else None
             days = (today - l.date).days if l.date else None
@@ -101,9 +107,9 @@ class AnalyticsService:
         return views, quotes, symbols
 
     # ------------------------------------------------------------- overview
-    def overview(self, snap: SheetSnapshot, live: bool) -> dict:
+    def overview(self, snap: SheetSnapshot) -> dict:
         today = dt.date.today()
-        views, quotes, symbols = self._price_lots(snap, live, today)
+        views, quotes, symbols = self.price_lots(snap, today)
         any_live = any(v.price_source == "live" for v in views)
         as_of = today if any_live else max([d for d in [snap.valuation_date] + [l.date for l in snap.lots] if d] or [today])
         invested = sum(v.lot.cost for v in views)
@@ -120,10 +126,11 @@ class AnalyticsService:
             day_change = dc
         gross = sum(v.lot.qty * v.lot.rate for v in views)
         charges = sum(v.lot.charges for v in views)
+        liq = self.tax.liquidation(snap, views) if (self.tax is not None and views) else None
         return {
             "meta": {
                 "valuation_date": snap.valuation_date.isoformat() if snap.valuation_date else None,
-                "price_source": "live" if any_live else "sheet",
+                "price_source": "live" if any_live else "last_sync",
                 "live_coverage": _r(sum(1 for h in holdings if h["price_source"] == "live") / len(holdings) * 100, 0) if holdings else None,
                 "as_of": as_of.isoformat(),
                 "sheet_name": snap.sheet_name,
@@ -137,13 +144,28 @@ class AnalyticsService:
                 "holdings": len(holdings), "lots": len(views),
                 "charges": _r(charges), "charges_pct": _r(charges / gross * 100 if gross else None, 3),
                 "sheet_grand_total": _r(snap.totals.get("grand_total_cost")),
+                **self._liquidation_kpis(liq, invested),
             },
-            "holdings": holdings,
+            "holdings": self._with_tax(holdings, liq),
             "allocation": self._allocation(holdings, snap),
             "concentration": self._concentration(holdings),
             "timeline": self._timeline(snap.lots),
             "issues": [i.__dict__ for i in snap.issues],
         }
+
+    def _liquidation_kpis(self, liq, invested) -> dict:
+        if not liq:
+            return {}
+        t = liq["total"]
+        return {"tax_if_sold": t["tax_if_sold"], "exit_costs": t["exit_costs"], "after_tax_value": t["after_tax_value"],
+                "after_tax_gain": t["after_tax_gain"],
+                "after_tax_gain_pct": _r(t["after_tax_gain"] / invested * 100 if invested else None)}
+
+    @staticmethod
+    def _with_tax(holdings, liq) -> list[dict]:
+        for h in holdings:
+            h.update((liq or {}).get("holdings", {}).get(h["name"], {}))
+        return holdings
 
     def _holdings(self, views: list[LotView], quotes, symbols, as_of, total_value) -> list[dict]:
         groups: dict[str, list[LotView]] = defaultdict(list)
@@ -242,128 +264,6 @@ class AnalyticsService:
             out.append({"month": k, "invested": _r(months[k]), "cumulative": _r(cum), "buys": counts[k]})
         return out
 
-    # ---------------------------------------------------------------- tax
-    def tax(self, snap: SheetSnapshot, live: bool) -> dict:
-        cfg = self.settings.all()
-        today = dt.date.today()
-        views, _, _ = self._price_lots(snap, live, today)
-        st_rate, lt_rate, slab = cfg["stcg_rate_pct"] / 100, cfg["ltcg_rate_pct"] / 100, cfg["slab_rate_pct"] / 100
-        buckets = defaultdict(float)  # (class, term, sign)
-        for v in views:
-            if v.term == "?" or v.price is None:
-                continue
-            buckets[(v.tclass, v.term)] += v.gain
-        st_eq = buckets[("equity", "ST")]
-        st_slab = buckets[("non_equity", "ST")] + buckets[("debt", "ST")] + buckets[("debt", "LT")]
-        lt_eq = buckets[("equity", "LT")]
-        lt_ne = buckets[("non_equity", "LT")]
-        # set-off: ST losses against any gains (highest rate first), LT losses only against LT gains
-        st = {"slab": st_slab, "eq": st_eq}
-        lt = {"ne": lt_ne, "eq": lt_eq}
-        for k in ("slab", "eq"):
-            if st[k] < 0:
-                loss = -st[k]
-                st[k] = 0
-                for tgt, pool in (("slab", st), ("eq", st), ("ne", lt), ("eq", lt)):
-                    if loss <= 0:
-                        break
-                    if pool[tgt] > 0:
-                        use = min(loss, pool[tgt])
-                        pool[tgt] -= use
-                        loss -= use
-        for k in ("ne", "eq"):
-            if lt[k] < 0:
-                loss = -lt[k]
-                lt[k] = 0
-                for tgt in ("ne", "eq"):
-                    if loss > 0 and lt[tgt] > 0:
-                        use = min(loss, lt[tgt])
-                        lt[tgt] -= use
-                        loss -= use
-        exemption_left = max(0.0, cfg["ltcg_exemption"] - cfg["realized_ltcg_fy"])
-        lt_eq_taxable = max(0.0, lt["eq"] - exemption_left)
-        est_tax = st["slab"] * slab + st["eq"] * st_rate + lt_eq_taxable * lt_rate + lt["ne"] * lt_rate
-
-        avg_chg = (sum(v.lot.charges for v in views) / sum(v.lot.qty * v.lot.rate for v in views)) if views else 0.0
-        harvest = self._harvest(views, exemption_left, lt_rate, avg_chg)
-        window = int(cfg["upcoming_lt_window_days"])
-        upcoming = []
-        for v in views:
-            if v.term == "ST" and v.lt_date and v.gain > 0 and (v.lt_date - today).days <= window:
-                diff = (st_rate if v.tclass == "equity" else slab) - lt_rate
-                upcoming.append({**v.as_dict(), "days_to_lt": (v.lt_date - today).days,
-                                 "tax_saved_by_waiting": _r(v.gain * diff)})
-        upcoming.sort(key=lambda x: x["days_to_lt"])
-        losses = [v.as_dict() for v in views if v.gain < 0 and v.price is not None]
-        losses.sort(key=lambda x: x["gain"])
-        fy_s, fy_e = fy_bounds(today)
-        return {
-            "fy": fy_label(today), "fy_end": fy_e.isoformat(), "days_left_in_fy": (fy_e - today).days,
-            "rates": {"stcg": cfg["stcg_rate_pct"], "ltcg": cfg["ltcg_rate_pct"], "slab": cfg["slab_rate_pct"],
-                      "exemption": cfg["ltcg_exemption"]},
-            "unrealised": {
-                "st_equity": _r(st_eq), "lt_equity": _r(lt_eq), "st_other": _r(st_slab), "lt_other": _r(lt_ne),
-            },
-            "realised_ltcg_fy": cfg["realized_ltcg_fy"],
-            "exemption_left": _r(exemption_left),
-            "estimated_tax_if_sold_today": _r(est_tax),
-            "harvest": harvest,
-            "upcoming_lt": upcoming,
-            "loss_lots": losses[:20],
-            "loss_total": {"st": _r(sum(l["gain"] for l in losses if l["term"] == "ST")),
-                           "lt": _r(sum(l["gain"] for l in losses if l["term"] == "LT"))},
-            "lots": [v.as_dict() for v in views],
-        }
-
-    def _harvest(self, views: list[LotView], headroom: float, lt_rate: float, avg_chg: float) -> dict:
-        """LTCG harvesting under FIFO: units sold come from the oldest lots first, so only the
-        FIFO prefix of long-term lots can be sold without creating short-term gains."""
-        groups: dict[str, list[LotView]] = defaultdict(list)
-        for v in views:
-            if v.tclass == "equity" and v.price is not None and v.lot.date:
-                groups[v.lot.name].append(v)
-        options = []
-        for name, vs in groups.items():
-            vs.sort(key=lambda v: (v.lot.date, v.lot.row))
-            units, gain, value = 0.0, 0.0, 0.0
-            steps = []
-            for v in vs:
-                if v.term != "LT":
-                    break
-                per_unit = v.gain / v.lot.held_qty if v.lot.held_qty else 0
-                steps.append((v, per_unit))
-            if not steps:
-                continue
-            options.append((name, steps))
-        # greedy: highest gain per rupee sold first (fewest units/charges per rupee harvested)
-        left = headroom
-        plan = []
-        for name, steps in sorted(options, key=lambda o: -max((pu / (o[1][0][0].price or 1)) for _, pu in o[1])):
-            if left <= 1:
-                break
-            units = gain = 0.0
-            for v, pu in steps:
-                if pu <= 0:
-                    # an older lot at a loss must be sold first (FIFO); include it, it reduces gain
-                    units += v.lot.held_qty
-                    gain += v.gain
-                    continue
-                can = min(v.lot.held_qty, math.floor(max(0.0, left - gain) / pu)) if pu else 0
-                units += can
-                gain += can * pu
-                if can < v.lot.held_qty:
-                    break
-            if units <= 0 or gain <= 0:
-                continue
-            price = steps[0][0].price
-            charges = 2 * avg_chg * units * price
-            plan.append({"name": name, "units": units, "price": _r(price), "sell_value": _r(units * price),
-                         "gain": _r(gain), "tax_saved": _r(gain * lt_rate), "est_charges": _r(charges),
-                         "net_benefit": _r(gain * lt_rate - charges)})
-            left -= gain
-        return {"headroom": _r(headroom), "plan": plan,
-                "total_gain": _r(sum(p["gain"] for p in plan)), "total_tax_saved": _r(sum(p["tax_saved"] for p in plan))}
-
     # -------------------------------------------------------------- charges
     def charges(self, snap: SheetSnapshot) -> dict:
         lots = snap.lots
@@ -406,7 +306,7 @@ class AnalyticsService:
         cfg = self.settings.all()
         sym = cfg["benchmark_symbol"]
         lots = [l for l in snap.lots if l.date]
-        if not lots or not cfg["live_prices"]:
+        if not lots or self.prices.provider is None:
             return {"available": False, "reason": "Live prices are disabled" if lots else "No dated purchases"}
         start = min(l.date for l in lots)
         hist = self.prices.history(sym, start)
@@ -426,7 +326,7 @@ class AnalyticsService:
             units += l.cost / close_on(l.date)
             flows.append((l.date, -l.cost))
         bench_value = units * last
-        ov = self.overview(snap, live=True)
+        ov = self.overview(snap)
         port_value = ov["kpis"]["value"] or 0
         bx = xirr(flows + [(today, bench_value)])
         px = xirr(flows + [(today, port_value)])

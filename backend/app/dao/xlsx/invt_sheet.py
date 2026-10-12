@@ -22,6 +22,7 @@ import io
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.dao.base import LayoutError
 from app.domain.models import (
@@ -31,6 +32,7 @@ from app.domain.models import (
     Lot,
     NewLot,
     PlannedRow,
+    PriceUpdateResult,
     Section,
     SectorEntry,
     SheetSnapshot,
@@ -39,7 +41,7 @@ from app.domain.models import (
 
 from . import refs
 from .evaluator import BLANK, Unsupported, XLError
-from .workbook import Cell, Sheet, Workbook, from_serial
+from .workbook import Cell, Sheet, Workbook, from_serial, to_serial
 
 
 def norm(s) -> str:
@@ -599,6 +601,108 @@ class InvtSheetDAO:
             if cand:
                 out[s] = cand
         return out
+
+    # ------------------------------------------------------------- price refresh
+    def _valuation_input(self, lay: _Layout) -> tuple[int, int] | None:
+        """The cell the user types the valuation date into. In Invt.xlsx 'No.of yrs' header
+        S1 is ``=L3``, so the input cell is L3. Only a plain single-cell reference (or a
+        literal date in S1 itself) is followed; anything else is left alone."""
+        if not lay.valuation_cell:
+            return None
+        r, c = lay.valuation_cell
+        f = lay.f(r, c)
+        if f is None:
+            return (r, c) if isinstance(lay.v(r, c), float) else None
+        ref = f.strip().lstrip("=")
+        if "!" in ref or not refs.CELL_RE.match(ref):
+            return None
+        rr, cc = refs.split_cell(ref)
+        return (rr, cc) if lay.f(rr, cc) is None else None
+
+    def update_prices(self, data: bytes, prices: dict[str, float], as_of: dt.date | None
+                      ) -> tuple[bytes | None, PriceUpdateResult]:
+        wb, sheet = self._open(data)
+        lay = discover(sheet, self.cfg)
+        before_cells = {k: (c.value, c.formula) for k, c in lay.cells.items()}
+        before = self._snapshot(lay)
+        col, cname = lay.col["market_rate"], lay.col["name"]
+        by_key = {name_key(n): round(float(p), 2) for n, p in prices.items() if p and p > 0}
+        targets: dict[tuple[int, int], Any] = {}
+        updated, unchanged, skipped, seen = [], [], [], set()
+        for r, kind in sorted(lay.row_kind.items()):
+            if kind != "lot":
+                continue
+            key = name_key(lay.text(r, cname) or "")
+            if key not in by_key:
+                continue
+            seen.add(key)
+            cell = lay.cells.get((r, col))
+            if cell is not None and cell.formula is not None:
+                skipped.append(r)  # never overwrite a formula
+                continue
+            cur = cell.value if cell is not None else BLANK
+            new = by_key[key]
+            if isinstance(cur, float) and abs(cur - new) < 0.005:
+                unchanged.append(r)
+                continue
+            targets[(r, col)] = new
+            updated.append(r)
+        missing = sorted({l.name for l in before.lots if name_key(l.name) not in seen})
+        vcell = self._valuation_input(lay)
+        vname = refs.cell_name(*vcell) if vcell else None
+        if vcell and as_of:
+            cur = lay.v(*vcell)
+            if not (isinstance(cur, float) and int(cur) == int(to_serial(as_of))):
+                targets[vcell] = as_of
+        if not targets:
+            return None, PriceUpdateResult(False, [], unchanged, skipped, missing, vname, as_of, [])
+        for (r, c), v in targets.items():
+            sheet.set_cell(r, c, v)  # keeps the cell's existing style
+        wb.mark_full_calc()
+        sheet.refresh_cached_values()
+        out = wb.to_bytes()
+        checks = self._verify_prices(out, before, before_cells, targets)
+        failed = [c for c in checks if not c["passed"]]
+        if failed:
+            raise RuntimeError("Price update verification failed, sheet NOT modified: "
+                               + "; ".join(c["detail"] for c in failed))
+        return out, PriceUpdateResult(True, updated, unchanged, skipped, missing, vname, as_of, checks)
+
+    def _verify_prices(self, new_bytes, before: SheetSnapshot, before_cells, targets) -> list[dict]:
+        sh2 = Workbook(new_bytes).sheet(before.sheet_name)
+        after_cells = sh2.cells()
+        bad = []
+        for (r, c), (val, f) in before_cells.items():
+            if (r, c) in targets:
+                continue
+            cell = after_cells.get((r, c))
+            if cell is None:
+                if not (val is BLANK and f is None):
+                    bad.append(f"{refs.cell_name(r, c)} missing")
+                continue
+            if f is not None:
+                if cell.formula != f:
+                    bad.append(f"{refs.cell_name(r, c)} formula changed")
+            elif cell.formula is not None or (cell.value != val and not (val is BLANK and cell.value is BLANK)):
+                bad.append(f"{refs.cell_name(r, c)} value changed")
+        extra = [k for k in after_cells if k not in before_cells and k not in targets
+                 and not (after_cells[k].value is BLANK and after_cells[k].formula is None)]
+        checks = [{"name": "other_cells_intact", "passed": not bad and not extra,
+                   "detail": "Only market-rate / valuation-date cells changed" if not bad and not extra
+                   else "; ".join((bad + [f"new cell {refs.cell_name(*k)}" for k in extra])[:5])}]
+        wrong = []
+        for (r, c), v in targets.items():
+            cell = after_cells.get((r, c))
+            exp = float(int(to_serial(v))) if isinstance(v, dt.date) else float(v)
+            if cell is None or cell.formula is not None or not isinstance(cell.value, float) or abs(cell.value - exp) > 1e-6:
+                wrong.append(refs.cell_name(r, c))
+        checks.append({"name": "targets_written", "passed": not wrong,
+                       "detail": f"{len(targets)} cell(s) written" if not wrong else f"wrong value in {', '.join(wrong)}"})
+        after = self._snapshot(discover(sh2, self.cfg))
+        same_cost = abs((after.totals.get("grand_total_cost") or 0) - (before.totals.get("grand_total_cost") or 0)) < 0.005
+        checks.append({"name": "cost_unchanged", "passed": same_cost and len(after.lots) == len(before.lots),
+                       "detail": "Purchase rows and invested total unchanged"})
+        return checks
 
     # ------------------------------------------------------------------- append
     def append(self, data: bytes, lots: list[NewLot], *, dry_run: bool = False) -> tuple[bytes | None, AppendResult]:
