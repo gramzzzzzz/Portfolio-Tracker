@@ -112,6 +112,7 @@ class TaxLot:
     tclass: str  # equity | non_equity | debt
     kind: str  # share | equity_fund | other (drives STT on sale)
     fractional: bool = False
+    lt_months: int = 12  # long term after this many months
 
     @property
     def unit_cost(self) -> float:
@@ -129,7 +130,7 @@ class TaxLot:
         self.units = max(0.0, self.units - units)
 
     def lt_date(self) -> dt.date:
-        return add_months(self.date, 12)
+        return add_months(self.date, self.lt_months)
 
     def term_on(self, sale: dt.date) -> str:
         return "LT" if sale > self.lt_date() else "ST"

@@ -59,7 +59,7 @@ class LotView:
     def as_dict(self):
         l = self.lot
         return {
-            "row": l.row, "name": l.name, "date": l.date.isoformat() if l.date else None, "qty": l.qty,
+            "row": l.row, "origin": l.origin, "name": l.name, "date": l.date.isoformat() if l.date else None, "qty": l.qty,
             "held_qty": l.held_qty, "rate": l.rate, "charges": _r(l.charges), "cost": _r(l.cost),
             "unit_cost": _r(l.cost / l.held_qty if l.held_qty else None, 4), "price": _r(self.price, 4),
             "price_source": self.price_source, "value": _r(self.value), "gain": _r(self.gain),
@@ -78,6 +78,34 @@ class AnalyticsService:
 
     def attach_tax(self, tax) -> None:
         self.tax = tax
+
+    portfolio = None  # PortfolioService (attached by the container)
+
+    def attach_portfolio(self, portfolio) -> None:
+        self.portfolio = portfolio
+
+    def _realised_flows(self, name: str | None = None) -> list[tuple[dt.date, float]]:
+        """Cash flows for XIRR that the open lots alone miss once something was sold: the full
+        cost of every purchase row (negative) minus the open lots' remaining cost, and the
+        net proceeds of each recorded sale (positive)."""
+        if self.portfolio is None:
+            return []
+        try:
+            st = self.portfolio.state()
+        except Exception:
+            return []
+        if not st.positions.sales:
+            return []
+        k = None if name is None else name.casefold()
+        flows = []
+        for sale in st.positions.sales:
+            if k and sale.name.casefold() != k:
+                continue
+            t = sale.txn
+            flows.append((t.date, (t.price or 0) * sale.units - (t.charges or 0) - (t.stt or 0)))
+            for leg in sale.legs:  # cost of the sold slices (open lots carry only what is left)
+                flows.append((leg.purchase_date, -leg.sheet_cost))
+        return flows
 
     # ------------------------------------------------------------- pricing
     def price_lots(self, snap: SheetSnapshot, today: dt.date | None = None):
@@ -99,7 +127,7 @@ class AnalyticsService:
             else:
                 price, src = l.market_rate, "last_sync"
             value = (price or 0.0) * l.held_qty
-            lt_date = add_months(l.date, 12) if l.date else None
+            lt_date = add_months(l.date, int(cfg["equity_lt_months"])) if l.date else None
             days = (today - l.date).days if l.date else None
             term = "?" if not l.date else ("LT" if today > lt_date else "ST")
             views.append(LotView(l, price, src, value, value - l.cost, days, term, lt_date,
@@ -114,7 +142,7 @@ class AnalyticsService:
         as_of = today if any_live else max([d for d in [snap.valuation_date] + [l.date for l in snap.lots] if d] or [today])
         invested = sum(v.lot.cost for v in views)
         value = sum(v.value for v in views)
-        flows = [(v.lot.date, -v.lot.cost) for v in views if v.lot.date] + [(as_of, value)]
+        flows = [(v.lot.date, -v.lot.cost) for v in views if v.lot.date] + [(as_of, value)] + self._realised_flows()
         holdings = self._holdings(views, quotes, symbols, as_of, value)
         day_change = None
         if any_live:
@@ -180,7 +208,7 @@ class AnalyticsService:
             sym = symbols.get(name)
             q = quotes.get(sym or "")
             price = vs[-1].price
-            flows = [(v.lot.date, -v.lot.cost) for v in vs if v.lot.date] + [(as_of, value)]
+            flows = [(v.lot.date, -v.lot.cost) for v in vs if v.lot.date] + [(as_of, value)] + self._realised_flows(name)
             x = xirr(flows)
             lt_qty = sum(v.lot.held_qty for v in vs if v.term == "LT")
             out.append({
@@ -196,7 +224,7 @@ class AnalyticsService:
                 "day_change_pct": _r(q.get("change_pct")) if q else None,
                 "high52": q.get("high52") if q else None, "low52": q.get("low52") if q else None,
                 "from_high_pct": _r((price / q["high52"] - 1) * 100) if q and q.get("high52") and price else None,
-                "rows": [v.lot.row for v in vs],
+                "rows": [v.lot.row for v in vs if v.lot.origin == "purchase"],
                 "lot_details": [v.as_dict() for v in vs],
             })
         out.sort(key=lambda h: -(h["value"] or 0))

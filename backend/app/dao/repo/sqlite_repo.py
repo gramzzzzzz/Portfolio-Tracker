@@ -89,6 +89,16 @@ CREATE TABLE IF NOT EXISTS cache (
     value TEXT NOT NULL,
     fetched_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS gold_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    filename TEXT,
+    size INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS gold_photos_item ON gold_photos(item_id);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -286,6 +296,26 @@ class Repository:
     def cache_put(self, key: str, value: Any) -> None:
         self._x("INSERT INTO cache(key,value,fetched_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET"
                 " value=excluded.value, fetched_at=excluded.fetched_at", (key, json.dumps(value), time.time()))
+
+    # ---------------------------------------------------------- gold photos
+    def add_gold_photo(self, item_id: str, sha256: str, mime: str, filename: str | None, size: int) -> int:
+        return self._x("INSERT INTO gold_photos(item_id,sha256,mime,filename,size,created_at) VALUES(?,?,?,?,?,?)",
+                       (item_id, sha256, mime, filename, size, time.time()))
+
+    def gold_photos(self, item_id: str | None = None) -> list[dict]:
+        if item_id is None:
+            return [dict(r) for r in self._q("SELECT * FROM gold_photos ORDER BY id")]
+        return [dict(r) for r in self._q("SELECT * FROM gold_photos WHERE item_id=? ORDER BY id", (item_id,))]
+
+    def gold_photo(self, photo_id: int) -> dict | None:
+        rows = self._q("SELECT * FROM gold_photos WHERE id=?", (photo_id,))
+        return dict(rows[0]) if rows else None
+
+    def delete_gold_photo(self, photo_id: int) -> None:
+        self._x("DELETE FROM gold_photos WHERE id=?", (photo_id,))
+
+    def photo_sha_in_use(self, sha256: str) -> bool:
+        return bool(self._q("SELECT 1 FROM gold_photos WHERE sha256=? LIMIT 1", (sha256,)))
 
     # --------------------------------------------------------------- audit
     def audit(self, action: str, detail: dict) -> None:

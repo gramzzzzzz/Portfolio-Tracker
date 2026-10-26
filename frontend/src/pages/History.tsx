@@ -131,7 +131,7 @@ function DiffModal({ v, onClose }: { v: Version; onClose: () => void }) {
           <div className="muted">
             Compared with version {data.against}. Invested {money(data.invested_before)} → {money(data.invested_after)}.
           </div>
-          {data.added_lots.length + data.removed_lots.length === 0 && <Alert tone="info">No purchase rows were added or removed.</Alert>}
+          {data.added_lots.length + data.removed_lots.length === 0 && appChanges(data) === 0 && <Alert tone="info">No purchase rows, sales or gold items changed in this version.</Alert>}
           {[
             ["Added purchase rows", data.added_lots, "pos"],
             ["Removed purchase rows", data.removed_lots, "neg"],
@@ -168,6 +168,8 @@ function DiffModal({ v, onClose }: { v: Version; onClose: () => void }) {
           )}
           {data.added_summary.length > 0 && <div>New summary rows: {data.added_summary.join(", ")}</div>}
           {data.added_sectors.length > 0 && <div>New sectors: {data.added_sectors.join(", ")}</div>}
+          <AppSheetDiff title="Transactions sheet" d={data.transactions} fmt={(t: any) => `${t.type} ${t.name} · ${date(t.date)} · ${t.type === "SPLIT" ? `1→${t.ratio}` : `${qty(t.qty)}${t.price ? ` @ ${money(t.price, true)}` : ""}`}`} />
+          <AppSheetDiff title="Gold sheet" d={data.gold} fmt={(g: any) => `${g.description} · ${qty(g.weight_g)} g ${g.purity} · paid ${money(g.amount_paid)}${g.sold_date ? ` · sold ${date(g.sold_date)} for ${money(g.sold_amount)}` : ""}`} />
         </div>
       )}
     </Modal>
@@ -224,5 +226,37 @@ function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
         </label>
       </div>
     </Modal>
+  );
+}
+
+type SheetDiff = { added: any[]; removed: any[]; changed: { before: any; after: any }[] } | undefined;
+
+function appChanges(d: { transactions?: SheetDiff; gold?: SheetDiff }) {
+  return [d.transactions, d.gold].reduce((a, x) => a + (x ? x.added.length + x.removed.length + x.changed.length : 0), 0);
+}
+
+function AppSheetDiff({ title, d, fmt }: { title: string; d: SheetDiff; fmt: (r: any) => string }) {
+  if (!d || d.added.length + d.removed.length + d.changed.length === 0) return null;
+  return (
+    <div>
+      <h3 style={{ marginBottom: 6 }}>{title}</h3>
+      <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+        {d.added.map((r) => (
+          <li key={"a" + r.id} className="pos">
+            Added: {fmt(r)}
+          </li>
+        ))}
+        {d.changed.map((c) => (
+          <li key={"c" + c.after.id}>
+            Changed: {fmt(c.before)} → {fmt(c.after)}
+          </li>
+        ))}
+        {d.removed.map((r) => (
+          <li key={"r" + r.id} className="neg">
+            Removed: {fmt(r)}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

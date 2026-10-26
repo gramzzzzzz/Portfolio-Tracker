@@ -33,12 +33,31 @@ DEFAULTS: dict[str, Any] = {
     "sell_expense_pct": None,
     "dp_charge_per_sale": 0.0,
     "upcoming_lt_window_days": 60,
+    # listed shares / equity ETFs & funds: long term after this many months
+    "equity_lt_months": 12,
+    # STT (securities transaction tax), % of value; not deductible from gains
+    "stt_buy_share_pct": 0.1,  # delivery purchase of shares (used when a row has no contract note)
+    "stt_sell_share_pct": 0.1,  # delivery sale of shares
+    "stt_sell_fund_pct": 0.001,  # sale of equity ETF / fund units on the exchange
+    # ---- physical gold (all editable; defaults researched Oct 2026)
+    "gold_lt_months": 24,  # physical gold is long term after 24 months
+    "gold_ltcg_rate_pct": 12.5,  # no indexation, no exemption; short term -> slab rate
+    "gold_gst_pct": 3.0,  # on gold value (paid when buying; not refunded when selling)
+    "gold_making_gst_pct": 5.0,  # on making charges of jewellery
+    "gold_buyback_deduction_coin_pct": 1.0,  # jeweller / bank buy-back discount vs market rate
+    "gold_buyback_deduction_bar_pct": 1.0,
+    "gold_buyback_deduction_jewellery_pct": 5.0,
+    # price per gram of 24K: live = international spot (USD/oz x USD/INR) + domestic premium
+    # (customs duty 15% since 13 May 2026: 10% BCD + 5% AIDC, plus local premium/discount)
+    "gold_domestic_premium_pct": 15.0,
+    "gold_price_override_24k": None,  # Rs/g; set to use your jeweller's rate instead of live
+    "gold_purity": {"24K": 0.999, "22K": 0.916, "18K": 0.750, "14K": 0.585},
     # sector -> tax class: equity | non_equity (gold/silver ETFs, intl funds) | debt
     "tax_class_by_sector": {},
     # sector -> block heading in the main area, overrides automatic mapping
     "sector_block_overrides": {},
 }
-_NULLABLE = {"sell_expense_pct"}
+_NULLABLE = {"sell_expense_pct", "gold_price_override_24k"}
 _SIGNED = {"realized_stcg_fy", "realized_ltcg_fy", "realized_st_other_fy", "realized_lt_other_fy"}  # losses allowed
 
 _NUMERIC = {k for k, v in DEFAULTS.items() if isinstance(v, (int, float)) and not isinstance(v, bool)} | _NULLABLE
@@ -78,6 +97,16 @@ class SettingsService:
                     raise ValueError("Price sync interval must be at least 5 minutes")
             elif isinstance(self._defaults[k], bool):
                 v = bool(v)
+            elif k == "gold_purity":
+                if not isinstance(v, dict):
+                    raise ValueError("'gold_purity' must be an object")
+                clean = {}
+                for a, b in v.items():
+                    f = float(b)
+                    if not 0 < f <= 1:
+                        raise ValueError(f"Purity for {a} must be between 0 and 1 (e.g. 0.916)")
+                    clean[str(a).strip().upper()] = f
+                v = clean
             elif isinstance(self._defaults[k], dict):
                 if not isinstance(v, dict):
                     raise ValueError(f"'{k}' must be an object")

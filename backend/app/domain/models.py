@@ -107,6 +107,12 @@ class Lot:
     block: str | None  # heading of the block it sits under
     section: int
     sector: str | None = None  # resolved via the summary table
+    # set by the positions engine (sells / bonus / splits from the Transactions sheet)
+    origin: str = "purchase"  # purchase | bonus
+    txn_id: str | None = None  # bonus lots: the Transactions row that created it
+    orig_qty: float | None = None  # sheet quantity of the purchase row (before sells/splits)
+    orig_cost: float | None = None  # sheet Total Purchase Price of the row
+    orig_charges: float | None = None  # sheet charges (Comn.) of the row
 
 
 @dataclass
@@ -223,3 +229,81 @@ class PriceUpdateResult:
     valuation_cell: str | None
     valuation_date: dt.date | None
     checks: list[dict[str, Any]]
+
+
+# ------------------------------------------------------------------ app-owned sheets
+class TxnType(str, Enum):
+    SELL = "SELL"
+    BONUS = "BONUS"  # free shares allotted: qty = shares received
+    SPLIT = "SPLIT"  # ratio = new shares per old share (e.g. 5 for a 1:5 split)
+
+
+class AssetClass(str, Enum):
+    """Provision for every investment type. Only SHARE/ETF (main sheet) and GOLD are
+    implemented today; the others are accepted by the data model so they can be added
+    without schema changes."""
+
+    SHARE = "share"
+    ETF = "etf"
+    MUTUAL_FUND = "mutual_fund"
+    GOLD = "physical_gold"
+    FD = "fd"
+    RD = "rd"
+    OTHER = "other"
+
+
+@dataclass
+class Transaction:
+    """A row of the app-owned ``Transactions`` sheet (events that are not purchases)."""
+
+    id: str
+    date: dt.date
+    type: TxnType
+    name: str  # security name exactly as in the tracking sheet
+    qty: float = 0.0  # SELL: units sold; BONUS: units received
+    price: float | None = None  # SELL: price per unit
+    charges: float = 0.0  # SELL: brokerage + exchange + SEBI + GST + stamp (deductible)
+    stt: float = 0.0  # SELL: STT (not deductible)
+    ratio: float | None = None  # SPLIT: new units per old unit
+    isin: str | None = None
+    asset_class: str = AssetClass.SHARE.value
+    broker: str | None = None
+    note_no: str | None = None
+    source: str = "manual"  # manual | contract_note
+    remarks: str | None = None
+    row: int | None = None
+
+    @property
+    def proceeds(self) -> float:
+        return round((self.price or 0.0) * self.qty, 2)
+
+
+@dataclass
+class GoldItem:
+    """A row of the app-owned ``Gold`` sheet (physical gold, entered by hand)."""
+
+    id: str
+    date: dt.date
+    description: str
+    form: str  # coin | bar | jewellery
+    purity: str  # 24K | 22K | 18K | 14K | custom like "0.916"
+    weight_g: float
+    amount_paid: float  # total paid incl. making charges and GST
+    making_charges: float = 0.0  # included in amount_paid (informational)
+    gst_paid: float = 0.0  # included in amount_paid (informational)
+    seller: str | None = None
+    sold_date: dt.date | None = None
+    sold_amount: float | None = None
+    remarks: str | None = None
+    # written by the app (price sync) so the sheet is readable on its own
+    rate_per_g: float | None = None
+    current_value: float | None = None
+    value_date: dt.date | None = None
+    row: int | None = None
+
+
+@dataclass
+class Extras:
+    transactions: list[Transaction]
+    gold: list[GoldItem]
+    warnings: list[str]

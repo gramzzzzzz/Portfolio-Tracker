@@ -6,6 +6,10 @@ The workbook is the source of truth. The app writes to it in exactly two ways:
 - **Imports** insert new rows (existing cells are never edited, formulas are never overwritten). Each import is saved as a new version.
 - **Price sync** writes live market prices into the market-rate cell of existing purchase rows and the sheet's valuation date, at startup and then every 60 minutes, so the workbook matches the app when opened on its own. Formula cells are never touched. Price writes update the current version in place instead of creating new versions.
 
+It also keeps two **extra sheets** of its own in the same workbook, added after your sheet. Writing them never changes your original sheet: after every write the app checks byte-for-byte that the original sheet's XML, the shared strings and the calc chain are unchanged, and aborts otherwise.
+- **`Transactions`**: sales (from contract notes or entered by hand), bonus shares and splits. Holdings, P&L and tax use them automatically: units sold are taken oldest first, bonus shares are dated on allotment at zero cost.
+- **`Gold`**: physical gold (coins, bars, jewellery) entered by hand, with the current rate and value refreshed by the price sync. Photos of items are kept in `data/photos/`.
+
 ## Run on a home server
 
 The only requirement is Docker with Compose (Docker Engine + the compose plugin, Docker Desktop, or Colima). Everything else (Python, Node, the UI build, the tests) runs inside the image build.
@@ -24,7 +28,7 @@ The image runs the test suite while it builds, so a broken build never produces 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PT_DATA_DIR` | `/data` | Sheet versions, SQLite metadata, uploaded notes, secret key |
+| `PT_DATA_DIR` | `/data` | Sheet versions, SQLite metadata, uploaded notes, gold photos, secret key |
 | `PT_SEED_SHEET` | `/seed/Invt.xlsx` | Workbook imported as version 1 when no sheet exists (missing file = ignored) |
 | `PT_LIVE_PRICES` | `true` | Live quotes (Yahoo Finance). `false` = offline: the app uses the market rates already in the sheet |
 | `PT_PRICE_SYNC_MINUTES` | `60` | Default interval for writing prices into the sheet (also editable in Settings). `0` disables the background sync |
@@ -64,7 +68,8 @@ Security: one user, one password. Login attempts are rate-limited, cookies are H
 1. **Import notes.** Drop one or more contract-note PDFs and enter the password once. It can be stored encrypted for next time. Every file in one upload uses the same password.
 2. **Review.** Each transaction is checked against the rows already in the sheet, including rows you typed in by hand, and labelled *New*, *Already in sheet* or *Possible duplicate*. For a new security, pick an existing sector or add a new one.
 3. **Preview → Write.** You see exactly which rows will be inserted and the result of the safety checks. Confirming creates a new sheet version.
-4. **Sheet history.** Download any version, see what changed in it, restore it (a restore is saved as a new version), or upload a copy you edited in Excel.
+4. **Sales, bonus shares, gold.** Sales in contract notes are imported to the Transactions sheet. Record bonus shares, splits or sales from elsewhere on **Investment history → Sales, bonus & splits**, and physical gold on **Physical gold**. Gold prices, buy-back deductions and tax rules are editable in **Settings**.
+5. **Sheet history.** Download any version, see what changed in it, restore it (a restore is saved as a new version), or upload a copy you edited in Excel.
 
 ## Development
 
@@ -75,7 +80,7 @@ PT_DATA_DIR=../data ../.venv/bin/uvicorn app.main:app --reload       # API on :8
 cd ../frontend && npm ci && npm run dev                              # UI on :5173 (proxies /api)
 ```
 
-The real sample files in `backend/tests/fixtures/` (your sheet and a contract note) contain personal data and are git-ignored. Without them, 14 tests are skipped; copy them back to run all 33.
+The real sample files in `backend/tests/fixtures/` (your sheet and a contract note) contain personal data and are git-ignored. Without them, the tests that need them are skipped; copy them back to run all 83.
 
 API docs: `/api/docs`. Architecture, design decisions and how to add another broker or sheet layout are covered in the project playbook (Google Doc).
 

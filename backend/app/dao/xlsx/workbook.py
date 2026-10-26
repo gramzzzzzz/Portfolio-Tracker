@@ -135,6 +135,15 @@ class Workbook:
         calc.set("fullCalcOnLoad", "1")
         self._touch("xl/workbook.xml")
 
+    def add_part(self, name: str, data: bytes) -> None:
+        """Register a new package part (written at the end of the zip)."""
+        if name not in self._parts:
+            self._zip_order.append(name)
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.external_attr = 0o600 << 16
+            self._zinfo[name] = info
+        self._parts[name] = data
+
     def sheet_names(self) -> list[str]:
         return list(self.sheet_paths)
 

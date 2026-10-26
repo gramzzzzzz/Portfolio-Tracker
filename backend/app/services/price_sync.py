@@ -19,6 +19,7 @@ import time
 
 from app.dao.base import PortfolioSheetDAO
 from app.dao.repo.sqlite_repo import Repository
+from app.domain.models import PriceUpdateResult
 from app.services.prices_service import PriceService
 from app.services.settings_service import SettingsService
 from app.services.version_service import NoSheetError, VersionService
@@ -42,6 +43,7 @@ class PriceSyncService:
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._run_lock = threading.Lock()  # one sync at a time
+        self.gold = None  # GoldService (attached by the container)
 
     @property
     def enabled(self) -> bool:
@@ -79,18 +81,32 @@ class PriceSyncService:
                 price_by_name = {n: quotes[s]["price"] for n, s in symbols.items() if s and s in quotes}
                 times = [quotes[s]["time"] for s in symbols.values() if s in quotes and quotes[s].get("time")]
                 as_of = dt.datetime.fromtimestamp(max(times), IST).date() if times else None
-                if not price_by_name:
+                if self.gold is not None:
+                    self.gold.price()  # warm the quote cache outside the lock
+                if not price_by_name and self.gold is None:
                     st.update(result="no_quotes", detail="No live quotes could be fetched")
                     return self._save(st)
                 # ---- brief critical section: read HEAD, edit, verify, swap
                 with self.versions.write_lock:
                     data = self.versions.head_bytes()
-                    new, res = self.dao.update_prices(data, price_by_name, as_of)
-                    if new is not None:
-                        self.versions.replace_head_content(
-                            new, note=f"Market rates refreshed for {len(res.updated_rows)} row(s)")
+                    if price_by_name:
+                        new, res = self.dao.update_prices(data, price_by_name, as_of)
+                    else:
+                        new, res = None, None
+                    gold_new = self.gold.refresh_sheet_values(new or data) if self.gold is not None else None
+                    final = gold_new or new
+                    if final is not None:
+                        parts = []
+                        if res is not None and res.changed:
+                            parts.append(f"market rates for {len(res.updated_rows)} row(s)")
+                        if gold_new is not None:
+                            parts.append("gold values")
+                        self.versions.replace_head_content(final, note="Refreshed " + " and ".join(parts))
+                if res is None:
+                    res = PriceUpdateResult(False, [], [], [], [], None, None, [])
+                st["gold_written"] = gold_new is not None
                 st.update(
-                    result="written" if res.changed else "unchanged",
+                    result="written" if (res.changed or gold_new is not None) else "unchanged",
                     rows_updated=len(res.updated_rows),
                     rows_unchanged=len(res.unchanged_rows),
                     skipped_formula_rows=res.skipped_formula_rows,
@@ -99,7 +115,7 @@ class PriceSyncService:
                     valuation_cell=res.valuation_cell,
                     duration_ms=int((time.time() - started) * 1000),
                 )
-                if res.changed:
+                if res.changed or gold_new is not None:
                     st["last_write"] = time.time()
                 else:
                     st["last_write"] = (self.repo.get(self.STATUS_KEY, {}) or {}).get("last_write")

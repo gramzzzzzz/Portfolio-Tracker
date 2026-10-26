@@ -79,6 +79,43 @@ class WithdrawalIn(BaseModel):
     exclude: list[str] = []
 
 
+class TxnIn(BaseModel):
+    date: dt.date
+    type: str = Field(pattern="^(SELL|BONUS|SPLIT)$")
+    name: str = Field(min_length=1, max_length=120)
+    qty: float = Field(default=0.0, ge=0)
+    price: float | None = Field(default=None, ge=0)
+    charges: float = Field(default=0.0, ge=0)
+    stt: float = Field(default=0.0, ge=0)
+    ratio: float | None = Field(default=None, gt=0)
+    remarks: str | None = Field(default=None, max_length=300)
+
+    def to_domain(self, txn_id: str | None = None):
+        from app.domain.models import Transaction, TxnType
+        return Transaction(id=txn_id or "", date=self.date, type=TxnType(self.type), name=self.name.strip(),
+                           qty=self.qty, price=self.price, charges=self.charges, stt=self.stt, ratio=self.ratio,
+                           remarks=self.remarks, source="manual")
+
+
+class GoldIn(BaseModel):
+    date: dt.date
+    description: str = Field(min_length=1, max_length=120)
+    form: str = Field(pattern="^(coin|bar|jewellery)$")
+    purity: str = Field(min_length=1, max_length=12)
+    weight_g: float = Field(gt=0, le=1e6)
+    amount_paid: float = Field(gt=0, le=1e10)
+    making_charges: float = Field(default=0.0, ge=0)
+    gst_paid: float = Field(default=0.0, ge=0)
+    seller: str | None = Field(default=None, max_length=120)
+    sold_date: dt.date | None = None
+    sold_amount: float | None = Field(default=None, ge=0)
+    remarks: str | None = Field(default=None, max_length=300)
+
+    def to_domain(self, item_id: str | None = None):
+        from app.domain.models import GoldItem
+        return GoldItem(id=item_id or "", **self.model_dump())
+
+
 class RealisedIn(BaseModel):
     st_equity: float = 0.0
     lt_equity: float = 0.0
@@ -202,7 +239,7 @@ def create_app(config: Config | None = None, container: Container | None = None)
     # -------- portfolio (always valued at live prices; falls back to the last synced rate)
     @api.get("/portfolio/overview")
     def overview():
-        snap = c.versions.snapshot()
+        snap = c.portfolio.snapshot()
         out = c.analytics.overview(snap)
         out["meta"]["version"] = c.versions.head()
         out["meta"]["price_sync"] = c.price_sync.status()
@@ -211,12 +248,12 @@ def create_app(config: Config | None = None, container: Container | None = None)
     # -------- tax planning
     @api.get("/tax/summary")
     def tax_summary():
-        return c.tax.summary(c.versions.snapshot())
+        return c.tax.summary(c.portfolio.snapshot())
 
     @api.post("/tax/simulate-sale")
     def tax_simulate(body: SaleIn):
         try:
-            return c.tax.simulate_sale(c.versions.snapshot(), body.name, units=body.units, amount=body.amount,
+            return c.tax.simulate_sale(c.portfolio.snapshot(), body.name, units=body.units, amount=body.amount,
                                        sale_date=body.sale_date, price=body.price)
         except ValueError as e:
             raise HTTPException(422, str(e))
@@ -224,14 +261,14 @@ def create_app(config: Config | None = None, container: Container | None = None)
     @api.post("/tax/raise-cash")
     def tax_raise_cash(body: RaiseCashIn):
         try:
-            return c.tax.raise_cash(c.versions.snapshot(), body.amount, body.exclude)
+            return c.tax.raise_cash(c.portfolio.snapshot(), body.amount, body.exclude)
         except ValueError as e:
             raise HTTPException(422, str(e))
 
     @api.post("/tax/withdrawal-plan")
     def tax_withdrawals(body: WithdrawalIn):
         try:
-            return c.tax.withdrawal_plan(c.versions.snapshot(), body.monthly_amount, body.months,
+            return c.tax.withdrawal_plan(c.portfolio.snapshot(), body.monthly_amount, body.months,
                                          body.annual_return_pct, body.start, body.exclude)
         except ValueError as e:
             raise HTTPException(422, str(e))
@@ -242,7 +279,88 @@ def create_app(config: Config | None = None, container: Container | None = None)
         c.settings.update({"realized_fy": fy_label(today), "realized_stcg_fy": body.st_equity,
                            "realized_ltcg_fy": body.lt_equity, "realized_st_other_fy": body.st_slab,
                            "realized_lt_other_fy": body.lt_other})
-        return c.tax.summary(c.versions.snapshot())
+        return c.tax.summary(c.portfolio.snapshot())
+
+    # -------- sells / bonus / splits (Transactions sheet)
+    @api.get("/transactions")
+    def txn_list():
+        return c.transactions.list()
+
+    @api.post("/transactions")
+    def txn_add(body: TxnIn):
+        try:
+            return c.transactions.add(body.to_domain())
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.put("/transactions/{txn_id}")
+    def txn_update(txn_id: str, body: TxnIn):
+        try:
+            return c.transactions.update(txn_id, body.to_domain(txn_id))
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.delete("/transactions/{txn_id}")
+    def txn_delete(txn_id: str):
+        try:
+            return c.transactions.delete(txn_id)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    # -------- investment history (all asset classes)
+    @api.get("/history/events")
+    def history_events():
+        return c.history.events()
+
+    @api.get("/history/holdings")
+    def history_holdings(on: dt.date | None = None):
+        return c.history.holdings_on(on or dt.date.today())
+
+    @api.get("/history/timeline")
+    def history_timeline():
+        return c.history.timeline()
+
+    # -------- physical gold (Gold sheet + photos)
+    @api.get("/gold")
+    def gold_overview():
+        return c.gold.overview()
+
+    @api.post("/gold")
+    def gold_add(body: GoldIn):
+        try:
+            return c.gold.add(body.to_domain())
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.put("/gold/{item_id}")
+    def gold_update(item_id: str, body: GoldIn):
+        try:
+            return c.gold.update(item_id, body.to_domain(item_id))
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.delete("/gold/{item_id}")
+    def gold_delete(item_id: str):
+        return c.gold.delete(item_id)
+
+    @api.post("/gold/{item_id}/photos")
+    async def gold_photo_add(item_id: str, file: UploadFile = File(...)):
+        data = await file.read(8 * 1024 * 1024 + 1)
+        try:
+            return c.gold.add_photo(item_id, data, file.filename)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.get("/gold/photos/{photo_id}")
+    def gold_photo(photo_id: int):
+        data, mime, name = c.gold.photo(photo_id)
+        return Response(data, media_type=mime, headers={"Cache-Control": "private, max-age=86400",
+                                                       "Content-Disposition": f'inline; filename="{name}"'})
+
+    @api.delete("/gold/photos/{photo_id}")
+    def gold_photo_delete(photo_id: int):
+        c.gold.delete_photo(photo_id)
+        return {"ok": True}
 
     # -------- price sync
     @api.get("/prices/sync")
@@ -259,7 +377,7 @@ def create_app(config: Config | None = None, container: Container | None = None)
 
     @api.get("/portfolio/benchmark")
     def benchmark():
-        return c.analytics.benchmark(c.versions.snapshot())
+        return c.analytics.benchmark(c.portfolio.snapshot())
 
     @api.get("/portfolio/ledger")
     def ledger():

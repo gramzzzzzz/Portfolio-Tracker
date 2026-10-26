@@ -8,6 +8,8 @@ import Holdings from "./pages/Holdings";
 import ImportPage from "./pages/Import";
 import Insights from "./pages/Insights";
 import TaxPlanner from "./pages/TaxPlanner";
+import InvestmentHistory from "./pages/InvestmentHistory";
+import Gold from "./pages/Gold";
 import History from "./pages/History";
 import SettingsPage from "./pages/Settings";
 import Login from "./pages/Login";
@@ -53,6 +55,8 @@ function AppProvider({ children }: { children: ReactNode }) {
 const NAV: { to: string; label: string; icon: IconName }[] = [
   { to: "/", label: "Dashboard", icon: "dashboard" },
   { to: "/holdings", label: "Holdings", icon: "holdings" },
+  { to: "/investments", label: "Investment history", icon: "timeline" },
+  { to: "/gold", label: "Physical gold", icon: "gold" },
   { to: "/import", label: "Import notes", icon: "upload" },
   { to: "/tax", label: "Tax planner", icon: "tax" },
   { to: "/insights", label: "Insights", icon: "insights" },
@@ -194,6 +198,8 @@ export default function App() {
         <Route path="import" element={<ImportPage />} />
         <Route path="import/:batchId" element={<ImportPage />} />
         <Route path="tax" element={<TaxPlanner />} />
+        <Route path="investments" element={<InvestmentHistory />} />
+        <Route path="gold" element={<Gold />} />
         <Route path="insights" element={<Insights />} />
         <Route path="history" element={<History />} />
         <Route path="settings" element={<SettingsPage />} />

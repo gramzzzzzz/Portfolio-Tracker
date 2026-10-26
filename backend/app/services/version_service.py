@@ -187,7 +187,9 @@ class VersionService:
         removed = [l for l in old.lots if old_c[sig(l)] - new_c.get(sig(l), 0) > 0] if old else []
         old_sum = {s.name for s in old.summary if s.name} if old else set()
         old_sec = {s.name for s in old.sectors} if old else set()
+        extra = self._diff_app_sheets(self.blobs.get(v["sha256"]), self.bytes_of(base_id) if base_id else None)
         return {
+            **extra,
             "version": vid,
             "against": base_id,
             "added_lots": [_lot_dict(l) for l in added],
@@ -197,6 +199,34 @@ class VersionService:
             "invested_before": old.totals.get("grand_total_cost") if old else None,
             "invested_after": new.totals.get("grand_total_cost"),
         }
+
+
+    extras_dao = None  # ExtraSheetsDAO (attached by the container): app sheets in diffs
+
+    def _diff_app_sheets(self, new: bytes, old: bytes | None) -> dict:
+        """Rows added / removed / changed in the app-owned sheets (Transactions, Gold)."""
+        if self.extras_dao is None:
+            return {}
+        a = self.extras_dao.read(new)
+        b = self.extras_dao.read(old) if old else None
+
+        def txn(t):
+            return {"id": t.id, "date": t.date.isoformat(), "type": t.type.value, "name": t.name, "qty": t.qty,
+                    "price": t.price, "ratio": t.ratio}
+
+        def gold(g):
+            return {"id": g.id, "date": g.date.isoformat(), "description": g.description, "form": g.form,
+                    "purity": g.purity, "weight_g": g.weight_g, "amount_paid": g.amount_paid,
+                    "sold_date": g.sold_date.isoformat() if g.sold_date else None, "sold_amount": g.sold_amount}
+
+        def compare(new_rows, old_rows, fn):
+            n = {r.id: fn(r) for r in new_rows}
+            o = {r.id: fn(r) for r in old_rows} if old_rows is not None else {}
+            return {"added": [n[k] for k in n if k not in o], "removed": [o[k] for k in o if k not in n],
+                    "changed": [{"before": o[k], "after": n[k]} for k in n if k in o and n[k] != o[k]]}
+
+        return {"transactions": compare(a.transactions, b.transactions if b else None, txn),
+                "gold": compare(a.gold, b.gold if b else None, gold)}
 
 
 class ConflictError(Exception):

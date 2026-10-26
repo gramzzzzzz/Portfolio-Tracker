@@ -47,9 +47,26 @@ def test_possible_duplicate_and_one_row_one_trade():
     assert res["a"].status == "duplicate" and res["b"].status == "new"
 
 
-def test_sell_flagged():
-    res = classify_trades([("a", trade(side=Side.SELL), "ITC")], [])
-    assert res["a"].status == "sell"
+def test_sells_are_left_to_classify_sells():
+    assert classify_trades([("a", trade(side=Side.SELL), "ITC")], []) == {}
+
+
+def test_sell_classification_against_transactions_sheet():
+    from app.domain.models import Transaction, TxnType
+    from app.services.matching import classify_sells
+
+    s = trade(side=Side.SELL)  # 10 @ 260 on D
+    rec = [Transaction("T-1", D, TxnType.SELL, "ITC", 10, 260.0)]
+    assert classify_sells([("a", s, "ITC")], rec, {"itc": 30})["a"].status == "duplicate"
+    assert classify_sells([("a", s, "ITC")], [], {"itc": 30})["a"].status == "sell"
+    assert classify_sells([("a", s, "ITC")], [], {"itc": 5})["a"].status == "sell_exceeds"
+    assert classify_sells([("a", s, None)], [], {})["a"].status == "sell_unknown"
+    # two identical sells, one recorded: one duplicate + one new (each row absorbs one trade)
+    two = classify_sells([("a", s, "ITC"), ("b", s, "ITC")], rec, {"itc": 30})
+    assert (two["a"].status, two["b"].status) == ("duplicate", "sell")
+    # available units are consumed across the batch
+    more = classify_sells([("a", s, "ITC"), ("b", s, "ITC")], [], {"itc": 15})
+    assert (more["a"].status, more["b"].status) == ("sell", "sell_exceeds")
 
 
 def test_other_date_is_new():

@@ -21,6 +21,8 @@ const P = {
   diff: "M12 3v18M3 12h18",
   chevron: "M9 6l6 6-6 6",
   sheet: "M4 4h16v16H4V4zm0 5h16M4 14h16M9 4v16",
+  timeline: "M3 12h4l3-8 4 16 3-8h4",
+  gold: "M4 19h16l-3-7H7l-3 7zm4-7l2-5h4l2 5",
   tax: "M9 14l6-6M9.5 8.5h.01M14.5 13.5h.01M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2V3z",
 };
 export type IconName = keyof typeof P;

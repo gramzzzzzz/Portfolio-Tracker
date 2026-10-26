@@ -150,3 +150,59 @@ def test_tax_endpoints(app_client, sheet_bytes):
     s2 = c.put("/api/tax/realised", json={"st_equity": 5000, "lt_equity": 0, "st_slab": 0, "lt_other": 0}).json()
     assert s2["realised"]["current"] and s2["realised_tax"]["total"] == pytest.approx(5000 * 0.2 * 1.04)
     assert c.get("/api/prices/sync").json()["enabled"] is False
+
+
+def test_transactions_gold_history_endpoints(app_client, sheet_bytes):
+    c = app_client
+    login(c)
+    upload_sheet(c, sheet_bytes)
+    r = c.post("/api/transactions", json={"date": "2026-10-20", "type": "SELL", "name": "SBI ETF GOLD", "qty": 10,
+                                          "price": 120, "charges": 0.2})
+    assert r.status_code == 200, r.text
+    tid = r.json()["transactions"][0]["id"]
+    assert c.post("/api/transactions", json={"date": "2026-10-20", "type": "SELL", "name": "SBI ETF GOLD",
+                                             "qty": 999, "price": 1}).status_code == 422
+    assert c.post("/api/transactions", json={"date": "2026-10-20", "type": "DIVIDEND", "name": "X"}).status_code == 422
+    ov = c.get("/api/portfolio/overview").json()
+    assert ov["holdings"][0]["qty"] == 50
+    s = c.get("/api/tax/summary").json()
+    assert s["realised"]["sales"][0]["id"] == tid and s["realised_tax"]["total"] > 0
+    assert c.put(f"/api/transactions/{tid}", json={"date": "2026-10-20", "type": "SELL", "name": "SBI ETF GOLD",
+                                                   "qty": 5, "price": 120}).json()["transactions"][0]["qty"] == 5
+    assert c.delete(f"/api/transactions/{tid}").json()["transactions"] == []
+
+    g = c.post("/api/gold", json={"date": "2024-01-10", "description": "Coin", "form": "coin", "purity": "24K",
+                                  "weight_g": 10, "amount_paid": 62000}).json()
+    gid = g["items"][0]["id"]
+    assert g["price"]["source"] is None  # live prices off in tests, no override
+    c.put("/api/settings", json={"gold_price_override_24k": 14000})
+    g = c.get("/api/gold").json()
+    assert g["items"][0]["market_value"] == 140000 and g["items"][0]["sale_value"] == pytest.approx(138600)
+    assert "_per_g_24k_exact" not in g["price"]
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    pid = c.post(f"/api/gold/{gid}/photos", files={"file": ("a.png", png, "image/png")}).json()["id"]
+    img = c.get(f"/api/gold/photos/{pid}")
+    assert img.status_code == 200 and img.headers["content-type"] == "image/png" and img.content == png
+    assert c.post(f"/api/gold/{gid}/photos", files={"file": ("a.txt", b"hello", "text/plain")}).status_code == 422
+
+    ev = c.get("/api/history/events").json()
+    assert {e["asset_class"] for e in ev["events"]} == {"etf", "physical_gold"}
+    h = c.get("/api/history/holdings?on=2024-06-01").json()
+    assert [x["asset_class"] for x in h["holdings"]] == ["physical_gold"]
+    assert c.get("/api/history/timeline").json()["points"]
+
+
+def test_tax_rates_and_periods_are_settings(app_client, sheet_bytes):
+    c = app_client
+    login(c)
+    upload_sheet(c, sheet_bytes)
+    lot = lambda: c.get("/api/tax/summary").json()["lots"][0]  # noqa: E731  SBI ETF GOLD bought 23 Oct 2025
+    assert lot()["term"] == "LT"  # > 12 months as of today
+    c.put("/api/settings", json={"equity_lt_months": 36})
+    s = c.get("/api/tax/summary").json()
+    assert s["lots"][0]["term"] == "ST" and "36 months" in s["assumptions"][1]
+    assert c.get("/api/portfolio/overview").json()["holdings"][0]["lot_details"][0]["term"] == "ST"
+    c.put("/api/settings", json={"stt_sell_fund_pct": 0.5, "stt_sell_share_pct": 0.2, "stt_buy_share_pct": 0.3})
+    s = c.get("/api/tax/summary").json()
+    assert s["costs"]["stt_fund_pct"] == 0.5 and s["costs"]["stt_share_pct"] == 0.2
+    assert "0.3%" in s["assumptions"][3]

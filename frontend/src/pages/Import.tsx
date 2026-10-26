@@ -180,7 +180,9 @@ const STATUS: Record<string, { label: string; tone: "pos" | "neg" | "warn" | "in
   new: { label: "New", tone: "info" },
   duplicate: { label: "Already in sheet", tone: undefined },
   possible_duplicate: { label: "Possible duplicate", tone: "warn" },
-  sell: { label: "Sell", tone: "neg" },
+  sell: { label: "New sale", tone: "info" },
+  sell_exceeds: { label: "More than held", tone: "neg" },
+  sell_unknown: { label: "Holding not found", tone: "warn" },
 };
 
 function Review({ id }: { id: string }) {
@@ -231,6 +233,10 @@ function Review({ id }: { id: string }) {
   const problems = selected.flatMap((it) => {
     const d = dec[it.id];
     const out: string[] = [];
+    if (it.trade.side === "SELL") {
+      if (!b.sheet.securities.includes(d.name)) out.push(`${it.trade.security_name}: choose the holding that was sold`);
+      return out;
+    }
     if (!d.name.trim()) out.push(`${it.trade.security_name}: enter a name`);
     if (!d.sector.trim()) out.push(`${d.name || it.trade.security_name}: choose a sector`);
     return out;
@@ -324,7 +330,8 @@ function Review({ id }: { id: string }) {
         <SummaryTile label="New" value={b.summary.new} tone="info" />
         <SummaryTile label="Already in sheet" value={b.summary.duplicates} />
         <SummaryTile label="Possible duplicates" value={b.summary.possible} tone="warn" />
-        {b.summary.sells > 0 && <SummaryTile label="Sells (not recorded)" value={b.summary.sells} tone="neg" />}
+        {b.summary.sells > 0 && <SummaryTile label="Sales (→ Transactions sheet)" value={b.summary.new_sells ?? 0} tone="info" />}
+        {(b.summary.sell_problems ?? 0) > 0 && <SummaryTile label="Sales needing attention" value={b.summary.sell_problems ?? 0} tone="neg" />}
         {b.summary.files_failed > 0 && <SummaryTile label="Files not read" value={b.summary.files_failed} tone="neg" />}
       </div>
 
@@ -452,7 +459,7 @@ function ItemRow({ it, d, set, securities, sectors, sheetSectors, addSector }: {
   return (
     <tr style={{ opacity: d.include || it.status === "new" ? 1 : 0.75 }}>
       <td>
-        <input type="checkbox" className="check" checked={d.include} disabled={sell} onChange={(e) => set({ include: e.target.checked })} aria-label={`Include ${t.security_name}`} style={{ width: 16, height: 16 }} />
+        <input type="checkbox" className="check" checked={d.include} onChange={(e) => set({ include: e.target.checked })} aria-label={`Include ${t.security_name}`} style={{ width: 16, height: 16 }} />
       </td>
       <td>
         <div style={{ fontWeight: 600 }}>
@@ -478,7 +485,22 @@ function ItemRow({ it, d, set, securities, sectors, sheetSectors, addSector }: {
       </td>
       <td>
         {sell ? (
-          <span className="muted small">The tracking sheet has no sell columns; sells are logged in the app only.</span>
+          <div className="stack" style={{ gap: 6 }}>
+            <select
+              className="input sm"
+              value={d.name}
+              onChange={(e) => set({ mode: "existing", name: e.target.value })}
+              aria-label="Holding that was sold"
+              disabled={!d.include}
+              style={{ borderColor: d.include && !securities.includes(d.name) ? "var(--warn)" : undefined }}
+            >
+              {!securities.includes(d.name) && <option value={d.name}>Choose the holding that was sold…</option>}
+              {securities.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <span className="muted small">Recorded in the Transactions sheet; the main sheet is not changed. Units are taken oldest first for tax.</span>
+          </div>
         ) : (
           <div className="stack" style={{ gap: 6 }}>
             <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
@@ -546,7 +568,7 @@ function ItemRow({ it, d, set, securities, sectors, sheetSectors, addSector }: {
 }
 
 function Plan({ plan }: { plan: PlanResult }) {
-  const kinds: Record<string, string> = { lot: "Purchase row", block_header: "Block heading", summary: "Summary row", sector: "Sector row", "summary+sector": "Summary + sector row" };
+  const kinds: Record<string, string> = { lot: "Purchase row", block_header: "Block heading", summary: "Summary row", sector: "Sector row", "summary+sector": "Summary + sector row", sell: "Sale" };
   return (
     <div className="stack">
       <p className="muted" style={{ margin: 0 }}>
@@ -563,7 +585,7 @@ function Plan({ plan }: { plan: PlanResult }) {
         <tbody>
           {plan.rows.map((r, i) => (
             <tr key={i}>
-              <td className="mono">{r.row}</td>
+              <td className="mono">{r.row ?? "—"}</td>
               <td>
                 <Badge tone={r.kind === "lot" ? "info" : undefined}>{kinds[r.kind] || r.kind}</Badge>
               </td>

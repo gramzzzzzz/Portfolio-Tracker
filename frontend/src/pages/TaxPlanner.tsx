@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Bar, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useApp } from "../App";
 import { Alert, Badge, Card, Empty, Kpi, Spinner, Tabs, useAsync, useToast } from "../components/ui";
@@ -16,12 +17,16 @@ interface Summary {
   fy: string; fy_end: string; days_left_in_fy: number; today: string;
   rules: { stcg_equity_pct: number; ltcg_pct: number; ltcg_exemption: number; slab_pct: number; surcharge_pct: number; cess_pct: number };
   costs: { expense_pct: number; expense_source: string; dp_charge: number; stt_share_pct: number; stt_fund_pct: number };
-  realised: GainsT & { current: boolean; fy: string };
+  realised: GainsT & {
+    current: boolean; fy: string; manual: GainsT;
+    sales: { id: string; date: string; name: string; units: number; price: number; proceeds: number; gain: number; gains: GainsT; source: string; note_no: string | null; legs: { row: number | null; origin: string; purchase_date: string; units: number; cost: number; gain: number; term: string; bucket_label: string }[] }[];
+    gold: { id: string; description: string; sold_date: string; sold_amount: number; cost: number; gain: number; term: string }[];
+  };
   realised_tax: Computation;
   unrealised: GainsT;
   position: { value: number; cost: number; gain_pre_tax: number; tax_if_sold: number; exit_costs: number; expenses: number; stt: number; after_tax_value: number; after_tax_gain: number; computation: Computation; tax_before: number; tax_after: number };
   holdings: { name: string; units: number; price: number; tax_if_sold: number; exit_costs: number; after_tax_value: number; after_tax_gain: number; lt_units: number; st_units: number }[];
-  lots: { row: number; name: string; date: string; units: number; price: number; value: number; cost: number; sheet_cost: number; stt_buy: number; exit_costs: number; gain: number; term: "LT" | "ST"; lt_date: string; days_to_lt: number; tax_class: string; bucket: Bucket; bucket_label: string; rate_pct: number; tax_if_sold: number; after_tax_gain: number; older_units_first: number }[];
+  lots: { row: number; bonus?: boolean; name: string; date: string; units: number; price: number; value: number; cost: number; sheet_cost: number; stt_buy: number; exit_costs: number; gain: number; term: "LT" | "ST"; lt_date: string; days_to_lt: number; tax_class: string; bucket: Bucket; bucket_label: string; rate_pct: number; tax_if_sold: number; after_tax_gain: number; older_units_first: number }[];
   excluded: { row: number; name: string; reason: string }[];
   harvest: { headroom: number; plan: { name: string; units: number; price: number; sell_value: number; gain: number; tax_now: number; future_tax_saved: number; round_trip_costs: number; net_benefit: number }[]; total_gain: number; total_future_tax_saved: number };
   loss_harvest: { name: string; units: number; loss: number; tax_saved_this_fy: number; carried_forward: { st: number; lt: number }; terms: string[] }[];
@@ -47,7 +52,7 @@ export default function TaxPlanner() {
         <div>
           <h1>Tax planner</h1>
           <p>
-            Capital gains for {d.fy} at live prices: what you would really keep, how to withdraw money with the least tax, and when waiting pays. {d.days_left_in_fy} days left in the financial year.
+            Capital gains on your shares and ETFs for {d.fy} at live prices: what you would really keep, how to withdraw money with the least tax, and when waiting pays. {d.days_left_in_fy} days left in the financial year. Physical gold has its own tax view on the <Link to="/gold">Physical gold</Link> page; gold you have sold is included in the gains booked below.
           </p>
         </div>
       </div>
@@ -207,7 +212,7 @@ function LegsTable({ legs }: { legs: Leg[] }) {
               <td>
                 <strong>{l.name}</strong>
                 <div className="muted small">
-                  bought {date(l.date)} · row {l.key}
+                  {Number(l.key) >= 1000000 ? "bonus shares, allotted" : "bought"} {date(l.date)}{Number(l.key) >= 1000000 ? "" : ` · row ${l.key}`}
                 </div>
               </td>
               <td className="num">{qty(l.units)}</td>
@@ -250,31 +255,88 @@ const num = (v: string) => (v.trim() === "" ? undefined : Number(v));
 // ------------------------------------------------------------------ gains booked this FY
 function Realised({ d, onSaved }: { d: Summary; onSaved: () => void }) {
   const toast = useToast();
-  const init = (k: Bucket) => String(d.realised.current ? d.realised[k] || "" : "");
+  const r = d.realised;
+  const init = (k: Bucket) => String(r.current ? r.manual[k] || "" : "");
   const [v, setV] = useState<Record<Bucket, string>>({ st_equity: init("st_equity"), lt_equity: init("lt_equity"), st_slab: init("st_slab"), lt_other: init("lt_other") });
+  const [showManual, setShowManual] = useState(Object.values(r.manual).some((x) => x));
   const save = async (e: FormEvent) => {
     e.preventDefault();
     await api.send("PUT", "/api/tax/realised", Object.fromEntries(Object.entries(v).map(([k, x]) => [k, Number(x || 0)])));
-    toast("Booked gains saved");
+    toast("Saved");
     onSaved();
   };
+  const total = (Object.keys(BUCKET) as Bucket[]).reduce((a, k) => a + (r[k] || 0), 0);
   return (
-    <Card title={`Gains already booked in ${d.fy}`} subtitle="Sales you made this year (from your broker's P&L statement). Every calculation on this page adds to these, so the exemption and set-off are right.">
-      <form className="stack" onSubmit={save}>
-        {!d.realised.current && d.realised.fy && <Alert tone="warn">The figures you entered were for {d.realised.fy}; they no longer apply. Enter this year's.</Alert>}
-        <div className="form-grid">
+    <Card title={`Gains already booked in ${d.fy}`} subtitle="Worked out automatically from the sales you recorded (contract notes, Investment history, Physical gold). Every calculation on this page adds to these, so the exemption and set-off are right.">
+      <div className="stack">
+        <dl className="kv">
           {(Object.keys(BUCKET) as Bucket[]).map((k) => (
-            <label className="field" key={k}>
-              <span>{BUCKET[k]} (₹)</span>
-              <input className="input" type="number" step="1" value={v[k]} placeholder="0" onChange={(e) => setV({ ...v, [k]: e.target.value })} />
-            </label>
+            <Fragment key={k}>
+              <dt>{BUCKET[k]}</dt>
+              <dd className={tone(r[k])}>{signedMoney(r[k])}</dd>
+            </Fragment>
           ))}
-        </div>
-        <div className="row">
-          <button className="btn primary">Save</button>
-          <span className="muted small">Losses as negative numbers. Tax on booked gains so far: {money(d.realised_tax.total)}.</span>
-        </div>
-      </form>
+          <dt>
+            <strong>Total · tax on it so far</strong>
+          </dt>
+          <dd>
+            <strong>
+              {signedMoney(total)} · {money(d.realised_tax.total)}
+            </strong>
+          </dd>
+        </dl>
+        {r.sales.length + r.gold.length > 0 ? (
+          <details>
+            <summary className="small">
+              {r.sales.length} share/ETF sale{r.sales.length === 1 ? "" : "s"}
+              {r.gold.length ? `, ${r.gold.length} gold sale${r.gold.length === 1 ? "" : "s"}` : ""} this year
+            </summary>
+            <table className="t" style={{ marginTop: 6 }}>
+              <tbody>
+                {r.sales.map((x) => (
+                  <tr key={x.id}>
+                    <td className="small">
+                      <strong>{x.name}</strong> · {qty(x.units)} @ {money(x.price, true)} on {date(x.date)}
+                      <div className="muted">{x.legs.map((l) => `${qty(l.units)} ${l.origin === "bonus" ? "bonus" : "bought " + date(l.purchase_date)} → ${l.bucket_label}`).join("; ")}</div>
+                    </td>
+                    <td className={`num ${tone(x.gain)}`}>{signedMoney(x.gain)}</td>
+                  </tr>
+                ))}
+                {r.gold.map((x) => (
+                  <tr key={x.id}>
+                    <td className="small">
+                      <strong>{x.description}</strong> (gold) sold {date(x.sold_date)} · {x.term}
+                    </td>
+                    <td className={`num ${tone(x.gain)}`}>{signedMoney(x.gain)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+        ) : (
+          <p className="muted small" style={{ margin: 0 }}>No sales recorded this year.</p>
+        )}
+        <label className="check small">
+          <input type="checkbox" checked={showManual} onChange={(e) => setShowManual(e.target.checked)} />I also booked gains outside this app (another broker, sales not recorded here)
+        </label>
+        {showManual && (
+          <form className="stack" onSubmit={save}>
+            {!r.current && r.fy && <Alert tone="warn">The extra figures you entered were for {r.fy}; they no longer apply.</Alert>}
+            <div className="form-grid">
+              {(Object.keys(BUCKET) as Bucket[]).map((k) => (
+                <label className="field" key={k}>
+                  <span>{BUCKET[k]} (₹)</span>
+                  <input className="input" type="number" step="1" value={v[k]} placeholder="0" onChange={(e) => setV({ ...v, [k]: e.target.value })} />
+                </label>
+              ))}
+            </div>
+            <div className="row">
+              <button className="btn primary">Save</button>
+              <span className="muted small">Only gains NOT recorded in this app. Losses as negative numbers.</span>
+            </div>
+          </form>
+        )}
+      </div>
     </Card>
   );
 }
@@ -720,7 +782,7 @@ function Lots({ d }: { d: Summary }) {
                   <td>
                     <strong>{l.name}</strong>
                     <div className="muted small">
-                      row {l.row} · bought {date(l.date)}
+                      {l.bonus ? "bonus shares" : `row ${l.row}`} · {l.bonus ? "allotted" : "bought"} {date(l.date)}
                       {l.older_units_first > 0 && ` · ${qty(l.older_units_first)} older units sell first`}
                     </div>
                   </td>

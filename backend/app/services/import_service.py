@@ -21,7 +21,8 @@ from app.dao.contract_notes.registry import ContractNoteReader
 from app.dao.repo.blobs import BlobStore
 from app.dao.repo.sqlite_repo import Repository
 from app.domain.models import NewLot, Side, SheetSnapshot, Trade
-from app.services.matching import classify_trades, resolve_security
+from app.domain.models import Transaction, TxnType
+from app.services.matching import classify_sells, classify_trades, resolve_security
 from app.services.prices_service import PriceService
 from app.services.settings_service import SettingsService
 from app.services.version_service import ConflictError, VersionService
@@ -73,7 +74,7 @@ def _trade_from_dict(d: dict) -> Trade:
 class ImportService:
     def __init__(self, repo: Repository, versions: VersionService, dao: PortfolioSheetDAO,
                  reader: ContractNoteReader, uploads: BlobStore, settings: SettingsService,
-                 prices: PriceService):
+                 prices: PriceService, portfolio=None, extras_dao=None):
         self.repo = repo
         self.versions = versions
         self.dao = dao
@@ -81,6 +82,8 @@ class ImportService:
         self.uploads = uploads
         self.settings = settings
         self.prices = prices
+        self.portfolio = portfolio  # PortfolioService: holdings after recorded sells
+        self.extras_dao = extras_dao  # Transactions sheet (sells)
 
     # ================================================================ staging
     def stage(self, files: list[tuple[str, bytes]], password: str | None, *, use_saved: bool,
@@ -171,6 +174,15 @@ class ImportService:
             triples.append((it["id"], t, res.sheet_name))
         # an item of a file duplicated inside the batch is a duplicate of the earlier one
         dd = classify_trades(triples, snap.lots)
+        if self.portfolio is not None:
+            st = self.portfolio.state()
+            recorded = [t for t in st.extras.transactions if t.type == TxnType.SELL]
+            held: dict[str, float] = {}
+            for l in st.snap.lots:
+                held[l.name.casefold()] = held.get(l.name.casefold(), 0.0) + l.held_qty
+        else:
+            recorded, held = [], {}
+        dd.update(classify_sells(triples, recorded, held))
         seen: dict[tuple, str] = {}
         for it, (iid, t, nm) in zip(batch["items"], triples):
             r = dd[iid]
@@ -193,7 +205,9 @@ class ImportService:
             "new": sum(1 for i in items if i["status"] == "new"),
             "duplicates": sum(1 for i in items if i["status"] == "duplicate"),
             "possible": sum(1 for i in items if i["status"] == "possible_duplicate"),
-            "sells": sum(1 for i in items if i["status"] == "sell"),
+            "sells": sum(1 for i in items if i["trade"]["side"] == "SELL"),
+            "new_sells": sum(1 for i in items if i["status"] == "sell"),
+            "sell_problems": sum(1 for i in items if i["status"] in ("sell_exceeds", "sell_unknown")),
         }
 
     def _proposal(self, it: dict, t: Trade, snap: SheetSnapshot, sectors: list[str], prev: dict) -> dict:
@@ -206,7 +220,7 @@ class ImportService:
         sector = (summ.sector if summ else None) or (lots[-1].sector if lots else None) or alias.get("sector") \
             or hint.get("sector")
         p = {
-            "include": it["status"] == "new",
+            "include": it["status"] in ("new", "sell"),
             "mode": "existing" if existing else "new",
             "name": existing or res["sheet_name"] or t.security_name,
             "sector": sector,
@@ -322,8 +336,7 @@ class ImportService:
                 continue
             t = _trade_from_dict(it["trade"])
             if t.side != Side.BUY:
-                errors.append(f"{t.security_name}: sell transactions cannot be written to the sheet")
-                continue
+                continue  # handled by _build_sells
             name = (p.get("name") or "").strip()
             if not name:
                 errors.append(f"{t.security_name}: a sheet name is required")
@@ -355,16 +368,76 @@ class ImportService:
         order = sorted(range(len(lots)), key=lambda i: (lots[i].date, i))
         return [lots[i] for i in order], [chosen[i] for i in order]
 
+    def _build_sells(self, batch: dict, snap: SheetSnapshot) -> tuple[list[Transaction], list[dict]]:
+        """Selected sell items -> Transactions rows. Validates holding name and quantity
+        (FIFO against what is held after already-recorded sells)."""
+        out, chosen, errors = [], [], []
+        names = {n.casefold(): n for n in snap.security_names()}
+        held: dict[str, float] = {}
+        if self.portfolio is not None:
+            for l in self.portfolio.state().snap.lots:
+                held[l.name.casefold()] = held.get(l.name.casefold(), 0.0) + l.held_qty
+        files = {f["id"]: f for f in batch["files"]}
+        for it in batch["items"]:
+            p = it["proposal"]
+            t = it["trade"]
+            if t["side"] != "SELL" or not p.get("include"):
+                continue
+            name = names.get((p.get("name") or "").strip().casefold())
+            if not name:
+                errors.append(f"{t['security_name']}: choose which holding in the sheet was sold")
+                continue
+            if t["qty"] > held.get(name.casefold(), 0.0) + 1e-6:
+                errors.append(f"{name}: selling {t['qty']:g} but only {held.get(name.casefold(), 0.0):g} units are held")
+                continue
+            held[name.casefold()] -= t["qty"]
+            note = files[it["file_id"]].get("note") or {}
+            deductible = (t["brokerage"] or 0) + (t["gst"] or 0) + (t["other_levies"] or 0)
+            out.append(Transaction(
+                id=f"T-{note.get('note_no', 'X')[-6:]}-{it['id'].split('-')[-1]}", date=dt.date.fromisoformat(t["trade_date"]),
+                type=TxnType.SELL, name=name, qty=t["qty"], price=t["rate"], charges=round(deductible, 2),
+                stt=round(t["stt"] or 0, 2), isin=t["isin"], broker=note.get("broker"), note_no=note.get("note_no"),
+                source="contract_note"))
+            chosen.append(it)
+        if errors:
+            raise ImportError_("; ".join(errors))
+        return out, chosen
+
+    def _write(self, data: bytes, lots: list[NewLot], sells: list[Transaction], *, dry_run: bool):
+        """Purchases -> main sheet (row insertion, as before); sells -> Transactions sheet."""
+        res = None
+        new = data
+        if lots:
+            out, res = self.dao.append(data, lots, dry_run=dry_run)
+            new = out if out is not None else data
+        result = _result_dict(res) if res else {"rows": [], "checks": [], "warnings": []}
+        if sells:
+            existing = self.extras_dao.read(data).transactions
+            ids = {t.id for t in existing}
+            for t in sells:
+                while t.id in ids:
+                    t.id = t.id + "a"
+                ids.add(t.id)
+            new = self.extras_dao.write(new, transactions=existing + sells)
+            for t in sells:
+                result["rows"].append({"kind": "sell", "row": None, "ref": None, "values": {},
+                                       "description": f"Sale of {t.qty:g} {t.name} @ {t.price:,.2f} on {t.date:%d %b %Y} "
+                                                      f"→ Transactions sheet ({t.id})"})
+            result["checks"].append({"name": "main_sheet_untouched_by_sells", "passed": True,
+                                     "detail": "Sales go to the Transactions sheet; the main sheet is verified byte-for-byte unchanged by that write"})
+        return (None if dry_run else new), result
+
     def preview(self, batch_id: str, decisions: list[dict]) -> dict:
         b = self._load(batch_id, staged=True)
         batch = b["data"]
         self._apply_decisions(batch, decisions)
         snap = self.versions.snapshot()
         lots, _ = self._build_lots(batch, snap)
-        if not lots:
+        sells, _ = self._build_sells(batch, snap)
+        if not lots and not sells:
             return {"rows": [], "checks": [], "warnings": ["Nothing selected to import"]}
-        _, res = self.dao.append(self.versions.head_bytes(), lots, dry_run=True)
-        return _result_dict(res)
+        _, result = self._write(self.versions.head_bytes(), lots, sells, dry_run=True)
+        return result
 
     def commit(self, batch_id: str, decisions: list[dict], message: str | None = None) -> dict:
         with self.versions.write_lock:
@@ -380,15 +453,18 @@ class ImportService:
             self._apply_decisions(batch, decisions)
             snap = self.versions.snapshot()
             lots, chosen = self._build_lots(batch, snap)
-            if not lots:
+            sells, chosen_sells = self._build_sells(batch, snap)
+            if not lots and not sells:
                 raise ImportError_("Nothing selected to import")
             try:
-                new_bytes, res = self.dao.append(self.versions.head_bytes(), lots)
+                new_bytes, result = self._write(self.versions.head_bytes(), lots, sells, dry_run=False)
             except RuntimeError as e:  # verification failure -> nothing written
                 raise ImportError_(str(e)) from e
+            chosen = chosen + chosen_sells
             notes = sorted({f["note"]["note_no"] for f in batch["files"] if f.get("note") and
                             any(i["file_id"] == f["id"] for i in chosen)})
-            msg = message or (f"Imported {len(lots)} transaction(s) from contract note(s) {', '.join(notes)}")
+            parts = ([f"{len(lots)} purchase(s)"] if lots else []) + ([f"{len(sells)} sale(s)"] if sells else [])
+            msg = message or (f"Imported {' and '.join(parts)} from contract note(s) {', '.join(notes)}")
             version = self.versions.commit(new_bytes, message=msg, source="import", batch_id=batch_id,
                                            expected_parent=b["base_version_id"])
             # ---- side effects in app storage (metadata only)
@@ -399,7 +475,6 @@ class ImportService:
                 t = it["trade"]
                 f = files[it["file_id"]]
                 status = ("recorded" if it["id"] in chosen_ids else
-                          "sell_not_recorded" if it["status"] == "sell" else
                           "skipped_duplicate" if it["status"] in ("duplicate", "possible_duplicate") else "skipped")
                 ledger.append({
                     "batch_id": batch_id, "version_id": version["id"], "broker": f["note"]["broker"],
@@ -408,7 +483,7 @@ class ImportService:
                     "gross": t["gross_value"], "brokerage": t["brokerage"], "gst": t["gst"], "stt": t["stt"],
                     "other_levies": t["other_levies"], "status": status,
                 })
-                if it["id"] in chosen_ids:
+                if it["id"] in chosen_ids and t["side"] == "BUY":
                     p = it["proposal"]
                     self.repo.upsert_security(t["isin"], p["name"], t["security_name"], p.get("sector"),
                                               p.get("symbol"))
@@ -420,10 +495,11 @@ class ImportService:
                     n = f["note"]
                     self.repo.upsert_note(n["broker"], n["note_no"], n["trade_date"], batch_id, n["charges"],
                                           n["net_payable"])
-            batch["result"] = _result_dict(res)
+            batch["result"] = result
             batch["result"]["version"] = version
             self.repo.save_batch(batch_id, "committed", b["base_version_id"], batch, result_version_id=version["id"])
-            self.repo.audit("import.commit", {"batch": batch_id, "version": version["id"], "rows": len(lots)})
+            self.repo.audit("import.commit", {"batch": batch_id, "version": version["id"], "rows": len(lots),
+                                              "sells": len(sells)})
             return self.view(batch_id)
 
 

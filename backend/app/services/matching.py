@@ -88,8 +88,7 @@ def classify_trades(items: list[tuple[str, Trade, str | None]], lots: list[Lot])
     # pass 1: exact
     for iid, t, nm in items:
         if t.side == Side.SELL:
-            out[iid] = DedupResult("sell", "Sell transactions are not recorded in the tracking sheet")
-            continue
+            continue  # sells are classified against the Transactions sheet (classify_sells)
         for l in candidates(t, nm):
             if abs(l.qty - t.qty) < 1e-6 and (
                 _price_close(l.rate, t.rate) or (l.qty and _price_close(l.cost / l.qty, t.net_value / t.qty))
@@ -99,7 +98,7 @@ def classify_trades(items: list[tuple[str, Trade, str | None]], lots: list[Lot])
                 break
     # pass 2: partial
     for iid, t, nm in items:
-        if iid in out:
+        if iid in out or t.side == Side.SELL:
             continue
         cands = candidates(t, nm)
         same_qty = [l for l in cands if abs(l.qty - t.qty) < 1e-6]
@@ -115,4 +114,41 @@ def classify_trades(items: list[tuple[str, Trade, str | None]], lots: list[Lot])
                                    + ", ".join(str(l.row) for l in cands) + ")", [l.row for l in cands])
         else:
             out[iid] = DedupResult("new", "Not found in sheet")
+    return out
+
+
+def classify_sells(items: list[tuple[str, Trade, str | None]], recorded: list, held: dict[str, float]) -> dict[str, DedupResult]:
+    """Sells vs the app-owned Transactions sheet (rows typed by hand count too).
+
+    ``recorded``: Transaction rows of type SELL; ``held``: units currently held per sheet name
+    (casefolded). Each recorded row absorbs at most one trade."""
+    out: dict[str, DedupResult] = {}
+    used: set[str] = set()
+    left = dict(held)
+    for iid, t, nm in items:
+        if t.side != Side.SELL:
+            continue
+        if not nm:
+            out[iid] = DedupResult("sell_unknown", "No holding with this name in the sheet; choose which holding was sold")
+            continue
+        k = nm.casefold()
+        same = [r for r in recorded if r.id not in used and r.name.casefold() == k and r.date == t.trade_date]
+        exact = [r for r in same if abs(r.qty - t.qty) < 1e-6 and r.price and _price_close(r.price, t.rate)]
+        if exact:
+            used.add(exact[0].id)
+            out[iid] = DedupResult("duplicate", f"Already in the Transactions sheet ({exact[0].id}: {exact[0].qty:g} @ "
+                                                f"{exact[0].price:,.2f})")
+            continue
+        if same:
+            used.add(same[0].id)
+            out[iid] = DedupResult("possible_duplicate", f"A sale of {nm} on the same date is already recorded "
+                                                         f"({same[0].id}: {same[0].qty:g} units)")
+            continue
+        have = left.get(k, 0.0)
+        if t.qty > have + 1e-6:
+            out[iid] = DedupResult("sell_exceeds", f"Sells {t.qty:g} units but only {have:g} are held in the sheet "
+                                                   "(missing purchase rows?)")
+            continue
+        left[k] = have - t.qty
+        out[iid] = DedupResult("sell", f"New sale - will be added to the Transactions sheet ({have:g} units held)")
     return out

@@ -17,20 +17,23 @@ from collections import defaultdict
 from app.dao.repo.sqlite_repo import Repository
 from app.domain.models import SheetSnapshot
 from app.services import tax_engine as te
+from app.services.analytics_service import tax_class
 from app.services.finance import add_months, fy_bounds, fy_label
 from app.services.settings_service import SettingsService
 
-ASSUMPTIONS = [
-    "Units are sold oldest-first (FIFO), as the depository debits them.",
-    "Held more than 12 months = long term (listed shares, equity funds/ETFs, gold ETFs).",
-    "STT is excluded from the cost of acquisition and is not deductible on sale; brokerage, exchange, "
-    "SEBI, GST and DP charges on the sale are deducted from the sale value.",
-    "Purchase STT comes from imported contract notes; for rows typed in by hand it is estimated at 0.1% "
-    "of the purchase value for shares (0 for ETFs / funds).",
-    "Equity LTCG exemption is applied after set-off of losses and resets every 1 April.",
-    "Not modelled: losses carried forward from earlier years, grandfathering of pre-2018 purchases, "
-    "the basic-exemption-limit adjustment and rebates. This is a planning aid, not tax advice.",
-]
+def assumptions(c: dict) -> list[str]:
+    return [
+        "Units are sold oldest-first (FIFO), as the depository debits them.",
+        f"Held more than {int(c['equity_lt_months'])} months = long term (listed shares, equity funds/ETFs, gold ETFs).",
+        "STT is excluded from the cost of acquisition and is not deductible on sale; brokerage, exchange, "
+        "SEBI, GST and DP charges on the sale are deducted from the sale value.",
+        f"Purchase STT comes from imported contract notes; for rows typed in by hand it is estimated at "
+        f"{c['stt_buy_share_pct']}% of the purchase value for shares (0 for ETFs / funds).",
+        "Equity LTCG exemption is applied after set-off of losses and resets every 1 April.",
+        "Not modelled: losses carried forward from earlier years, grandfathering of pre-2018 purchases, "
+        "the basic-exemption-limit adjustment and rebates. This is a planning aid, not tax advice.",
+    ]
+
 
 
 def _r(x, n=2):
@@ -38,10 +41,12 @@ def _r(x, n=2):
 
 
 class TaxService:
-    def __init__(self, repo: Repository, analytics, settings: SettingsService):
+    def __init__(self, repo: Repository, analytics, settings: SettingsService, portfolio=None):
         self.repo = repo
         self.analytics = analytics
         self.settings = settings
+        self.portfolio = portfolio  # PortfolioService: recorded sales -> realised gains
+        self.gold = None  # GoldService (attached by the container): gold sales -> realised gains
 
     # ----------------------------------------------------------------- inputs
     def rules(self) -> te.TaxRules:
@@ -69,17 +74,84 @@ class TaxService:
         if pct is None:
             obs = self.observed_expense_pct()
             pct = obs if obs is not None else 0.01
-        return te.SellCosts(expense_pct=pct, dp_charge=c["dp_charge_per_sale"])
+        return te.SellCosts(expense_pct=pct, dp_charge=c["dp_charge_per_sale"], stt_share_pct=c["stt_sell_share_pct"],
+                            stt_fund_pct=c["stt_sell_fund_pct"])
 
-    def realised(self, today: dt.date) -> tuple[te.Gains, bool]:
-        """Gains already booked this FY (entered by the user). Ignored once the FY they were
-        entered for is over."""
+    def manual_realised(self, today: dt.date) -> tuple[te.Gains, bool]:
+        """Gains booked this FY *outside* the app (other brokers, sales not recorded in the
+        Transactions sheet). Entered by the user; ignored once that FY is over."""
         c = self.settings.all()
         current = c.get("realized_fy") == fy_label(today)
         if not current:
             return te.Gains(), False
         return te.Gains(st_equity=c["realized_stcg_fy"], lt_equity=c["realized_ltcg_fy"],
                         st_slab=c["realized_st_other_fy"], lt_other=c["realized_lt_other_fy"]), True
+
+    def recorded_sales(self, fy_of: dt.date | None = None) -> list[dict]:
+        """Every recorded sale (Transactions sheet), split into FIFO legs with tax treatment.
+        ``fy_of``: only sales in the financial year containing that date."""
+        if self.portfolio is None:
+            return []
+        try:
+            st = self.portfolio.state()
+        except Exception:
+            return []
+        cfg = self.settings.all()
+        ledger_stt = self._purchase_stt()
+        rows = {l.row: l for l in st.sheet.lots}
+        window = fy_bounds(fy_of) if fy_of else None
+        out = []
+        for sale in st.positions.sales:
+            t = sale.txn
+            if window and not (window[0] <= t.date <= window[1]):
+                continue
+            src = rows.get(sale.legs[0].lot_row) if sale.legs else None
+            src = src or next((l for l in st.sheet.lots if l.name == sale.name), None)
+            tclass = tax_class(src.sector if src else None, sale.name, cfg["tax_class_by_sector"])
+            kind = self.kind_of(src, tclass) if src else "share"
+            units = sale.units or 1.0
+            legs, gains = [], te.Gains()
+            for g in sale.legs:
+                share = g.units / units
+                proceeds = (t.price or 0) * g.units
+                expenses = (t.charges or 0) * share
+                stt_sell = (t.stt or 0) * share
+                if g.origin == "bonus":
+                    stt_buy, cost = 0.0, 0.0
+                else:
+                    row_qty = g.orig_qty or 0
+                    row_cost = g.orig_cost or 0
+                    full = ledger_stt.get((sale.name, g.purchase_date.isoformat(), round(row_qty, 6)))
+                    if full is None:
+                        full = round(max(0.0, row_cost - (g.orig_charges or 0)) * cfg["stt_buy_share_pct"] / 100, 2) \
+                            if kind == "share" else 0.0
+                    stt_buy = full * (g.sheet_cost / row_cost) if row_cost else 0.0
+                    cost = g.sheet_cost - stt_buy
+                lt = t.date > add_months(g.purchase_date, int(cfg["equity_lt_months"]))
+                bucket = te.bucket_for(tclass, "LT" if lt else "ST")
+                gain = proceeds - cost - expenses
+                gains.add(bucket, gain)
+                legs.append({"row": g.lot_row if g.origin == "purchase" else None, "origin": g.origin,
+                             "purchase_date": g.purchase_date.isoformat(), "units": g.units, "proceeds": _r(proceeds),
+                             "cost": _r(cost), "stt_buy": _r(stt_buy), "expenses": _r(expenses), "stt_sell": _r(stt_sell),
+                             "gain": _r(gain), "term": "LT" if lt else "ST", "bucket": bucket,
+                             "bucket_label": te.BUCKET_SHORT[bucket]})
+            out.append({"id": t.id, "date": t.date.isoformat(), "fy": fy_label(t.date), "name": sale.name,
+                        "units": sale.units, "price": t.price, "proceeds": _r((t.price or 0) * sale.units),
+                        "charges": _r(t.charges), "stt": _r(t.stt), "gain": _r(gains.total), "gains": gains.as_dict(),
+                        "unmatched_units": sale.unmatched_units, "legs": legs, "source": t.source,
+                        "note_no": t.note_no, "asset_class": t.asset_class})
+        return out
+
+    def realised(self, today: dt.date) -> tuple[te.Gains, bool]:
+        """All gains booked this FY: recorded share sales + gold sales + manual entries."""
+        manual, current = self.manual_realised(today)
+        total = te.Gains(**manual.as_dict())
+        for s in self.recorded_sales(today):
+            total = total + te.Gains(**s["gains"])
+        if self.gold is not None:
+            total = total + self.gold.realised_gains(today)
+        return total, current
 
     def _purchase_stt(self) -> dict[tuple, float]:
         out = {}
@@ -88,10 +160,36 @@ class TaxService:
                 out[(r["sheet_name"], r["trade_date"], round(r["qty"] or 0, 6))] = r["stt"] or 0.0
         return out
 
+    @staticmethod
+    def kind_of(lot, tclass: str) -> str:
+        return "share" if (lot.section == 0 and tclass == te.EQUITY) else ("equity_fund" if tclass == te.EQUITY else "other")
+
+    def purchase_stt(self, lot, kind: str, ledger_stt: dict, fraction: float | None = None) -> float:
+        """Purchase STT attributable to (a fraction of) a lot.
+
+        The STT of the whole purchase row comes from the import ledger, or is estimated as 0.1%
+        of the row's gross value for shares (0 for ETFs/funds). It is then pro-rated by the share
+        of the row's cost still in this lot (``lot.cost / orig_cost``) - correct after partial
+        sells and splits - or by ``fraction`` of the lot when given. Bonus lots: 0."""
+        if getattr(lot, "origin", "purchase") == "bonus":
+            return 0.0
+        row_qty = lot.orig_qty if lot.orig_qty is not None else lot.qty
+        row_cost = lot.orig_cost if lot.orig_cost is not None else lot.cost
+        full = ledger_stt.get((lot.name, lot.date.isoformat(), round(row_qty, 6)))
+        if full is None:
+            row_charges = lot.orig_charges if lot.orig_charges is not None else lot.charges
+            full = round(max(0.0, row_cost - row_charges) * self.settings.get("stt_buy_share_pct") / 100, 2) \
+                if kind == "share" else 0.0
+        share = (lot.cost / row_cost) if row_cost else 0.0
+        if fraction is not None:
+            share *= fraction
+        return round(full * share, 4)
+
     def lots(self, snap: SheetSnapshot, views=None) -> tuple[dict[str, list[te.TaxLot]], list[dict], list]:
         """FIFO-ordered tax lots per holding + lots that cannot be taxed (no date/price)."""
         views = views if views is not None else self.analytics.price_lots(snap)[0]
         ledger_stt = self._purchase_stt()
+        lt_months = int(self.settings.get("equity_lt_months"))
         by_name: dict[str, list[te.TaxLot]] = defaultdict(list)
         excluded = []
         for v in views:
@@ -100,14 +198,12 @@ class TaxService:
                 excluded.append({"row": l.row, "name": l.name,
                                  "reason": "no purchase date" if not l.date else "no price" if not v.price else "no units"})
                 continue
-            kind = "share" if (l.section == 0 and v.tclass == te.EQUITY) else ("equity_fund" if v.tclass == te.EQUITY else "other")
-            stt = ledger_stt.get((l.name, l.date.isoformat(), round(l.qty, 6)))
-            if stt is None:
-                stt = round(l.qty * l.rate * 0.001, 2) if kind == "share" else 0.0
+            kind = self.kind_of(l, v.tclass)
+            stt = self.purchase_stt(l, kind, ledger_stt)
             by_name[l.name].append(te.TaxLot(
                 key=str(l.row), name=l.name, date=l.date, units=l.held_qty, cost=max(0.0, l.cost - stt),
                 sheet_cost=l.cost, stt_buy=stt, price=v.price, tclass=v.tclass, kind=kind,
-                fractional=not te.is_whole(l.held_qty)))
+                fractional=not te.is_whole(l.held_qty), lt_months=lt_months))
         for name, ls in by_name.items():
             ls.sort(key=lambda x: (x.date, int(x.key)))
             frac = any(x.fractional for x in ls)
@@ -154,7 +250,7 @@ class TaxService:
                 alone = te.evaluate(legs, realised, rules)
                 leg = legs[0]
                 lot_rows.append({
-                    "row": int(lot.key), "name": name, "date": lot.date.isoformat(), "units": lot.units,
+                    "row": int(lot.key), "bonus": int(lot.key) >= 1_000_000, "name": name, "date": lot.date.isoformat(), "units": lot.units,
                     "price": _r(lot.price), "value": _r(leg.proceeds), "cost": _r(lot.cost), "sheet_cost": _r(lot.sheet_cost),
                     "stt_buy": _r(lot.stt_buy), "exit_costs": _r(leg.expenses + leg.stt), "gain": _r(leg.gain),
                     "term": leg.term, "lt_date": lot.lt_date().isoformat(),
@@ -175,7 +271,10 @@ class TaxService:
             "costs": {"expense_pct": _r(costs.expense_pct, 4), "expense_source": "setting" if c["sell_expense_pct"] is not None
                       else ("your contract notes" if self.observed_expense_pct() is not None else "default"),
                       "dp_charge": costs.dp_charge, "stt_share_pct": costs.stt_share_pct, "stt_fund_pct": costs.stt_fund_pct},
-            "realised": {**realised.as_dict(), "current": realised_current, "fy": c.get("realized_fy")},
+            "realised": {**realised.as_dict(), "current": realised_current, "fy": c.get("realized_fy"),
+                         "manual": self.manual_realised(today)[0].as_dict(),
+                         "sales": self.recorded_sales(today),
+                         "gold": self.gold.realised_detail(today) if self.gold is not None else []},
             "realised_tax": te.compute_tax(realised, rules).as_dict(),
             "unrealised": unreal.as_dict(),
             "position": {
@@ -192,7 +291,7 @@ class TaxService:
             "harvest": self._harvest(holdings, realised, rules, costs, today, snap),
             "loss_harvest": self._loss_harvest(holdings, realised, rules, costs, today),
             "upcoming_lt": self._upcoming(holdings, realised, rules, costs, today, int(c["upcoming_lt_window_days"])),
-            "assumptions": ASSUMPTIONS,
+            "assumptions": assumptions(c),
         }
 
     def _harvest(self, holdings, realised: te.Gains, rules, costs, today, snap) -> dict:

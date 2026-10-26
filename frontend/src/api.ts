@@ -126,7 +126,7 @@ export interface Holding {
   low52: number | null;
   from_high_pct: number | null;
   rows: number[];
-  lot_details: LotDetail[];
+  lot_details: (LotDetail & { origin?: "purchase" | "bonus" })[];
   tax_if_sold?: number;
   exit_costs?: number;
   after_tax_value?: number;
@@ -229,7 +229,7 @@ export interface ImportItem {
   id: string;
   file_id: string;
   trade: TradeT;
-  status: "new" | "duplicate" | "possible_duplicate" | "sell";
+  status: "new" | "duplicate" | "possible_duplicate" | "sell" | "sell_exceeds" | "sell_unknown";
   reason: string;
   matched_rows: number[];
   resolution: { sheet_name: string | null; confidence: number; reason: string; candidates: { name: string; score: number }[] };
@@ -270,7 +270,7 @@ export interface Batch {
   stale: boolean;
   files: ImportFile[];
   items: ImportItem[];
-  summary: { files: number; files_ok: number; files_failed: number; trades: number; new: number; duplicates: number; possible: number; sells: number };
+  summary: { files: number; files_ok: number; files_failed: number; trades: number; new: number; duplicates: number; possible: number; sells: number; new_sells?: number; sell_problems?: number };
   result: PlanResult | null;
   sheet: { securities: string[]; sectors: string[] };
 }
@@ -294,7 +294,21 @@ export interface Settings {
   sell_expense_pct: number | null;
   dp_charge_per_sale: number;
   upcoming_lt_window_days: number;
+  equity_lt_months: number;
+  stt_buy_share_pct: number;
+  stt_sell_share_pct: number;
+  stt_sell_fund_pct: number;
   tax_class_by_sector: Record<string, string>;
   sector_block_overrides: Record<string, string>;
   has_pdf_password: boolean;
+  gold_lt_months: number;
+  gold_ltcg_rate_pct: number;
+  gold_gst_pct: number;
+  gold_making_gst_pct: number;
+  gold_buyback_deduction_coin_pct: number;
+  gold_buyback_deduction_bar_pct: number;
+  gold_buyback_deduction_jewellery_pct: number;
+  gold_domestic_premium_pct: number;
+  gold_price_override_24k: number | null;
+  gold_purity: Record<string, number>;
 }

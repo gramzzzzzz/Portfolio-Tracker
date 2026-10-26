@@ -189,7 +189,7 @@ function LotRows({ h, onSymbol }: { h: Holding; onSymbol: () => void }) {
             <tbody>
               {h.lot_details.map((l) => (
                 <tr key={l.row}>
-                  <td className="muted">{l.row}</td>
+                  <td className="muted">{l.origin === "bonus" ? <Badge tone="pos">bonus</Badge> : l.row}</td>
                   <td>{date(l.date)}</td>
                   <td className="num">
                     {qty(l.held_qty)}
