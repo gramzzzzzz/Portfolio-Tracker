@@ -6,7 +6,6 @@ the sheet is used - which is the last live price the price sync wrote there.
 """
 from __future__ import annotations
 
-import bisect
 import datetime as dt
 import math
 from collections import defaultdict
@@ -327,56 +326,4 @@ class AnalyticsService:
             "notes": [{"broker": n["broker"], "note_no": n["note_no"], "trade_date": n["trade_date"],
                        "net_payable": n["net_payable"], "charges_total": _r(sum(v or 0 for v in n["charges"].values()))}
                       for n in notes[:50]],
-        }
-
-    # ------------------------------------------------------------ benchmark
-    def benchmark(self, snap: SheetSnapshot) -> dict:
-        cfg = self.settings.all()
-        sym = cfg["benchmark_symbol"]
-        lots = [l for l in snap.lots if l.date]
-        if not lots or self.prices.provider is None:
-            return {"available": False, "reason": "Live prices are disabled" if lots else "No dated purchases"}
-        start = min(l.date for l in lots)
-        hist = self.prices.history(sym, start)
-        if not hist:
-            return {"available": False, "reason": f"Could not download {sym} history"}
-        dates = [d for d, _ in hist]
-
-        def close_on(d):
-            i = bisect.bisect_right(dates, d) - 1
-            return hist[max(i, 0)][1]
-
-        today = dt.date.today()
-        last = hist[-1][1]
-        units = 0.0
-        flows = []
-        for l in lots:
-            units += l.cost / close_on(l.date)
-            flows.append((l.date, -l.cost))
-        bench_value = units * last
-        ov = self.overview(snap)
-        port_value = ov["kpis"]["value"] or 0
-        bx = xirr(flows + [(today, bench_value)])
-        px = xirr(flows + [(today, port_value)])
-
-        # monthly series: invested, benchmark value (same cash flows)
-        series = []
-        lots_sorted = sorted(lots, key=lambda l: l.date)
-        d = dt.date(start.year, start.month, 1)
-        while d <= today:
-            nxt = add_months(d, 1)
-            point = min(nxt - dt.timedelta(days=1), today)
-            inv = sum(l.cost for l in lots_sorted if l.date <= point)
-            u = sum(l.cost / close_on(l.date) for l in lots_sorted if l.date <= point)
-            series.append({"date": point.isoformat(), "invested": _r(inv), "benchmark": _r(u * close_on(point))})
-            d = nxt
-        if series:
-            series[-1]["portfolio"] = _r(port_value)
-        return {
-            "available": True, "symbol": sym, "benchmark_value": _r(bench_value), "portfolio_value": _r(port_value),
-            "invested": _r(sum(l.cost for l in lots)),
-            "benchmark_xirr": _r(bx * 100 if bx is not None else None),
-            "portfolio_xirr": _r(px * 100 if px is not None else None),
-            "alpha": _r((px - bx) * 100) if px is not None and bx is not None else None,
-            "price_source": ov["meta"]["price_source"], "series": series,
         }

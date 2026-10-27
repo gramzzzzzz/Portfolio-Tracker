@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type Settings } from "../api";
 import { useApp } from "../App";
 import { timeAgo } from "../format";
+import { EmailSettings } from "../components/Email";
 import { Alert, Badge, Card, Icon, Spinner, useAsync, useToast } from "../components/ui";
 import { dateTime } from "../format";
 
@@ -17,6 +18,9 @@ export default function SettingsPage() {
   useEffect(() => {
     if (data) setS(data);
   }, [data]);
+  useEffect(() => {
+    if (s && location.hash) setTimeout(() => document.querySelector(location.hash)?.scrollIntoView({ block: "start" }), 50);
+  }, [!!s]); // eslint-disable-line react-hooks/exhaustive-deps
   if (loading && !s) return <Spinner />;
   if (error) return <Alert tone="neg">{error.message}</Alert>;
   if (!s) return null;
@@ -106,6 +110,8 @@ export default function SettingsPage() {
           </div>
         </Card>
       </div>
+
+      <EmailSettings />
 
       <PriceSyncCard s={s} setS={setS} save={save} />
 

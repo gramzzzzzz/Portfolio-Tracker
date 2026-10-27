@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { Bar as RBar, BarChart, CartesianGrid, Cell, Line, ComposedChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, type Overview } from "../api";
 import { useApp } from "../App";
+import { PerformanceSummary } from "../components/Performance";
 import { Alert, Badge, Bar, Card, Empty, Kpi, PALETTE, Spinner, useAsync } from "../components/ui";
 import { compactMoney, date, money, pct, signedMoney, tone } from "../format";
 
@@ -141,6 +142,8 @@ export default function Dashboard() {
         </Card>
       </div>
 
+      <PerformanceSummary />
+
       <div className="grid g-2">
         <Card title="Concentration" subtitle="How diversified the portfolio really is">
           <dl className="kv">
@@ -209,3 +212,4 @@ export default function Dashboard() {
     </div>
   );
 }
+

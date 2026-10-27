@@ -55,6 +55,21 @@ curl -s -b pt.jar -OJ http://server:8000/api/versions/3/download    # any older 
 
 Don't take files from `data/versions/`. They are named by content hash, and the current one is recorded only in the database.
 
+### Gmail setup (one time, for "Sync from email")
+
+Google requires your own OAuth client. Settings → Email shows the same steps and the exact redirect URI to use.
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Gmail API**.
+2. **Google Auth Platform**: user type *External*. Add yourself as a test user, then **Publish app**. In "Testing" mode Google expires the sign-in after 7 days.
+3. **Clients → Create client → Web application**. Add the redirect URI shown in Settings → Email, e.g. `http://localhost:8000/api/email/oauth/callback`.
+4. Paste the client ID and secret (or the downloaded JSON) into Settings → Email and click **Connect Gmail**. Google warns that the app is unverified; it's your own app, so choose *Continue*.
+
+Google only redirects back to `https://` or `http://localhost` addresses, not a LAN IP like `http://192.168.1.20:8000`. You have two options:
+- If you open the app through HTTPS or on localhost (for example via `ssh -L 8000:localhost:8000 server`), sign-in completes automatically.
+- Otherwise, after approving, the browser lands on a "can't reach localhost" page. Copy that page's address into the box the app shows.
+
+This is needed once. The app keeps an encrypted refresh token and uses the read-only scope `gmail.readonly`. Disconnecting revokes it.
+
 ### Storage
 
 Versions are kept indefinitely. Each one is a full copy of the workbook (about 20 KB for this sheet) and identical content is stored once. Price writes don't add versions, and the replaced file is deleted. Ten years of three imports a week is roughly 1,600 versions, about 35 MB, plus the uploaded PDFs (about 50 KB each).
@@ -68,6 +83,7 @@ Security: one user, one password. Login attempts are rate-limited, cookies are H
 1. **Import notes.** Drop one or more contract-note PDFs and enter the password once. It can be stored encrypted for next time. Every file in one upload uses the same password.
 2. **Review.** Each transaction is checked against the rows already in the sheet, including rows you typed in by hand, and labelled *New*, *Already in sheet* or *Possible duplicate*. For a new security, pick an existing sector or add a new one.
 3. **Preview → Write.** You see exactly which rows will be inserted and the result of the safety checks. Confirming creates a new sheet version.
+   **Or sync from email:** connect Gmail once (Settings → Email), then use **Import notes → Sync from email**. The app searches your inbox (default search `cnb 11 contract`, editable), downloads the PDF attachments to a temporary folder and opens them in the same review screen. Emails already imported are skipped.
 4. **Sales, bonus shares, gold.** Sales in contract notes are imported to the Transactions sheet. Record bonus shares, splits or sales from elsewhere on **Investment history → Sales, bonus & splits**, and physical gold on **Physical gold**. Gold prices, buy-back deductions and tax rules are editable in **Settings**.
 5. **Sheet history.** Download any version, see what changed in it, restore it (a restore is saved as a new version), or upload a copy you edited in Excel.
 

@@ -11,8 +11,10 @@ from app.dao.repo.blobs import BlobStore
 from app.dao.repo.sqlite_repo import Repository
 from app.dao.xlsx.invt_sheet import InvtSheetDAO
 from app.services.analytics_service import AnalyticsService
+from app.services.email_sync_service import EmailSyncService
 from app.services.gold_service import GoldService
 from app.services.history_service import HistoryService
+from app.services.performance_service import PerformanceService
 from app.services.import_service import ImportService
 from app.dao.xlsx.extra_sheets import ExtraSheetsDAO
 from app.services.portfolio_service import PortfolioService
@@ -43,9 +45,11 @@ class Container:
     transactions: TransactionsService
     gold: GoldService
     history: HistoryService
+    performance: PerformanceService
+    email: EmailSyncService
 
 
-def build(config: Config, *, price_provider=..., sheet_dao=None, reader=None) -> Container:
+def build(config: Config, *, price_provider=..., sheet_dao=None, reader=None, gmail=None) -> Container:
     repo = Repository(config.db_path)
     settings = SettingsService(repo, config.secret_key, max(5, config.price_sync_minutes or 60))
     dao = sheet_dao or InvtSheetDAO()
@@ -78,5 +82,8 @@ def build(config: Config, *, price_provider=..., sheet_dao=None, reader=None) ->
     tax.gold = gold
     price_sync.gold = gold
     history = HistoryService(portfolio)
+    performance = PerformanceService(portfolio, prices, analytics, settings)
+    email = EmailSyncService(repo, settings, imports, config.data_dir / "tmp", config.max_upload_mb * 1024 * 1024,
+                             gmail)
     return Container(config, repo, settings, versions, imports, prices, analytics, tax, price_sync, portfolio,
-                     extras_dao, transactions, gold, history)
+                     extras_dao, transactions, gold, history, performance, email)

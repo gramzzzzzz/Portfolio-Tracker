@@ -1,32 +1,33 @@
 import { Fragment, useState } from "react";
-import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "../api";
 import { useApp } from "../App";
+import { PerformancePanel } from "../components/Performance";
 import { Alert, Card, Kpi, Spinner, Tabs, useAsync } from "../components/ui";
-import { compactMoney, date, money, pct, tone } from "../format";
+import { money, pct } from "../format";
 
-type Tab = "charges" | "benchmark";
+type Tab = "performance" | "charges";
 
 export default function Insights() {
-  const [tab, setTab] = useState<Tab>("charges");
+  const [tab, setTab] = useState<Tab>("performance");
   return (
     <div className="stack">
       <div className="page-head">
         <div>
           <h1>Insights</h1>
-          <p>What your trading costs you and how you compare with the market. Tax planning has its own page.</p>
+          <p>How your money has grown, compared with the market, and what trading costs you. Tax planning has its own page.</p>
         </div>
       </div>
       <Tabs<Tab>
         value={tab}
         onChange={setTab}
         tabs={[
+          { id: "performance", label: "Performance" },
           { id: "charges", label: "Trading costs" },
-          { id: "benchmark", label: "vs. benchmark" },
+
         ]}
       />
       {tab === "charges" && <Charges />}
-      {tab === "benchmark" && <Benchmark />}
+      {tab === "performance" && <PerformancePanel />}
     </div>
   );
 }
@@ -110,41 +111,3 @@ function Charges() {
   );
 }
 const LABELS: Record<string, string> = { stt: "Securities transaction tax", stamp_duty: "Stamp duty", exchange_txn: "Exchange transaction charges", sebi_fees: "SEBI turnover fees", cgst: "CGST", sgst: "SGST", igst: "IGST", brokerage: "Brokerage", utt: "UTT", other: "Other" };
-
-function Benchmark() {
-  const { epoch } = useApp();
-  const { data: d, error, loading } = useAsync(() => api.get<any>("/api/portfolio/benchmark"), [epoch]);
-  if (loading && !d) return <Spinner label="Fetching index history" />;
-  if (error) return <Alert tone="neg">{error.message}</Alert>;
-  if (!d.available) return <Alert tone="info">{d.reason}. Enable live prices in Settings to compare against an index.</Alert>;
-  const beat = d.alpha != null && d.alpha >= 0;
-  return (
-    <div className="stack">
-      <Alert tone={beat ? "pos" : "warn"}>
-        If every rupee you invested had gone into <strong>{d.symbol}</strong> on the same dates, it would be worth <strong>{money(d.benchmark_value)}</strong> today versus your{" "}
-        <strong>{money(d.portfolio_value)}</strong>.
-      </Alert>
-      <div className="grid g-kpi">
-        <Kpi label="Your XIRR" value={pct(d.portfolio_xirr, 1, true)} valueClass={tone(d.portfolio_xirr)} />
-        <Kpi label={`${d.symbol} XIRR (same cash flows)`} value={pct(d.benchmark_xirr, 1, true)} valueClass={tone(d.benchmark_xirr)} />
-        <Kpi label="Out/under-performance" value={pct(d.alpha, 1, true)} valueClass={tone(d.alpha)} sub="per year" />
-      </div>
-      <Card title="Growth of your contributions">
-        <div style={{ height: 300 }}>
-          <ResponsiveContainer>
-            <LineChart data={d.series} margin={{ left: 0, right: 12, top: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" />
-              <XAxis dataKey="date" tick={{ fontSize: 11, fill: "var(--muted)" }} />
-              <YAxis tickFormatter={(v) => compactMoney(v)} width={64} tick={{ fontSize: 11, fill: "var(--muted)" }} />
-              <Tooltip formatter={(v) => money(Number(v))} labelFormatter={(l) => date(String(l))} />
-              <Legend />
-              <Line dataKey="invested" name="Invested" stroke="#94a3b8" dot={false} strokeDasharray="4 4" />
-              <Line dataKey="benchmark" name={d.symbol} stroke="#f59e0b" dot={false} strokeWidth={2} />
-              <Line dataKey="portfolio" name="Your portfolio (today)" stroke="#2563eb" strokeWidth={0} dot={{ r: 5 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </Card>
-    </div>
-  );
-}

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,8 @@ from app.container import Container, build
 from app.dao.base import LayoutError
 from app.services.finance import fy_label
 from app.services.import_service import ImportError_
+from app.dao.mail.gmail import GmailError
+from app.services.email_sync_service import EmailSyncError
 from app.services.sheet_lock import LockTimeout
 from app.services.version_service import ConflictError, NoSheetError
 
@@ -116,6 +118,23 @@ class GoldIn(BaseModel):
         return GoldItem(id=item_id or "", **self.model_dump())
 
 
+class EmailClientIn(BaseModel):
+    client_id: str | None = Field(default=None, max_length=200)
+    client_secret: str | None = Field(default=None, max_length=200)
+    client_json: str | None = Field(default=None, max_length=10000)
+
+
+class EmailCompleteIn(BaseModel):
+    url: str = Field(min_length=10, max_length=4000)
+
+
+class EmailSyncIn(BaseModel):
+    query: str | None = Field(default=None, max_length=300)
+    only_new: bool | None = None
+    password: str | None = Field(default=None, max_length=256)
+    save_password: bool = False
+
+
 class RealisedIn(BaseModel):
     st_equity: float = 0.0
     lt_equity: float = 0.0
@@ -157,6 +176,14 @@ def create_app(config: Config | None = None, container: Container | None = None)
     @app.exception_handler(LockTimeout)
     async def _busy(_req, exc):
         return JSONResponse(status_code=503, content={"detail": str(exc), "code": "busy"})
+
+    @app.exception_handler(EmailSyncError)
+    async def _mail(_req, exc):
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "email"})
+
+    @app.exception_handler(GmailError)
+    async def _gmail(_req, exc):
+        return JSONResponse(status_code=502, content={"detail": str(exc), "code": "gmail"})
 
     @app.exception_handler(KeyError)
     async def _nf(_req, exc):
@@ -228,6 +255,15 @@ def create_app(config: Config | None = None, container: Container | None = None)
         _set_cookie(response)
         return {"ok": True}
 
+    @public.get("/email/oauth/callback", include_in_schema=False)
+    def email_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+        from urllib.parse import quote
+        try:
+            c.email.complete(code, state, error)
+            return RedirectResponse("/settings?email=connected#email", status_code=303)
+        except (EmailSyncError, GmailError) as e:
+            return RedirectResponse(f"/settings?email_error={quote(str(e)[:300])}#email", status_code=303)
+
     @public.post("/auth/logout")
     def auth_logout(response: Response):
         response.delete_cookie(COOKIE, path="/")
@@ -280,6 +316,42 @@ def create_app(config: Config | None = None, container: Container | None = None)
                            "realized_ltcg_fy": body.lt_equity, "realized_st_other_fy": body.st_slab,
                            "realized_lt_other_fy": body.lt_other})
         return c.tax.summary(c.portfolio.snapshot())
+
+    # -------- email import (Gmail)
+    def base_url(request: Request) -> str:
+        # honours X-Forwarded-Proto/Host behind a reverse proxy (uvicorn --proxy-headers)
+        return str(request.base_url).rstrip("/")
+
+    @api.get("/email/status")
+    def email_status(request: Request):
+        st = c.email.status()
+        st["redirect_uri"] = c.email.redirect_uri_for(base_url(request), c.settings.get("gmail_redirect_uri"),
+                                                      request.url.port)
+        return st
+
+    @api.put("/email/client")
+    def email_client(body: EmailClientIn):
+        return c.email.set_client(body.client_id, body.client_secret, body.client_json)
+
+    @api.post("/email/connect")
+    def email_connect(request: Request):
+        return c.email.start(base_url(request))
+
+    @api.post("/email/oauth/complete")
+    def email_complete(body: EmailCompleteIn):
+        return c.email.complete_from_url(body.url)
+
+    @api.post("/email/disconnect")
+    def email_disconnect():
+        return c.email.disconnect()
+
+    @api.post("/email/preview")
+    def email_preview(body: EmailSyncIn):
+        return c.email.preview(body.query, body.only_new)
+
+    @api.post("/email/sync")
+    def email_sync(body: EmailSyncIn):
+        return c.email.sync(body.query, body.only_new, body.password or None, body.save_password)
 
     # -------- sells / bonus / splits (Transactions sheet)
     @api.get("/transactions")
@@ -375,9 +447,10 @@ def create_app(config: Config | None = None, container: Container | None = None)
     def charges():
         return c.analytics.charges(c.versions.snapshot())
 
-    @api.get("/portfolio/benchmark")
-    def benchmark():
-        return c.analytics.benchmark(c.portfolio.snapshot())
+    @api.get("/portfolio/performance")
+    def performance():
+        return c.performance.compute()
+
 
     @api.get("/portfolio/ledger")
     def ledger():

@@ -52,6 +52,12 @@ DEFAULTS: dict[str, Any] = {
     "gold_domestic_premium_pct": 15.0,
     "gold_price_override_24k": None,  # Rs/g; set to use your jeweller's rate instead of live
     "gold_purity": {"24K": 0.999, "22K": 0.916, "18K": 0.750, "14K": 0.585},
+    # ---- email import (Gmail)
+    "gmail_client_id": "",
+    "gmail_redirect_uri": "",  # empty = derived from how the app is opened (see EmailSyncService)
+    "gmail_query": "cnb 11 contract",
+    "gmail_only_new": True,
+    "gmail_max_messages": 50,
     # sector -> tax class: equity | non_equity (gold/silver ETFs, intl funds) | debt
     "tax_class_by_sector": {},
     # sector -> block heading in the main area, overrides automatic mapping
@@ -95,6 +101,8 @@ class SettingsService:
                     raise ValueError(f"'{k}' must be >= 0")
                 if k == "price_sync_minutes" and v < 5:
                     raise ValueError("Price sync interval must be at least 5 minutes")
+                if k == "gmail_max_messages" and not 1 <= v <= 500:
+                    raise ValueError("Emails per sync must be between 1 and 500")
             elif isinstance(self._defaults[k], bool):
                 v = bool(v)
             elif k == "gold_purity":
@@ -118,6 +126,19 @@ class SettingsService:
         return self.all()
 
     # ------------------------------------------------------------ pdf password
+    def set_secret(self, key: str, value: str | None) -> None:
+        """Generic encrypted secret (OAuth client secret, refresh token)."""
+        self.repo.put_secret(key, self._fernet.encrypt(value.encode()) if value else None)
+
+    def get_secret(self, key: str) -> str | None:
+        blob = self.repo.get_secret(key)
+        if blob is None:
+            return None
+        try:
+            return self._fernet.decrypt(blob).decode()
+        except InvalidToken:
+            return None
+
     def set_pdf_password(self, password: str | None) -> None:
         self.repo.put_secret("pdf_password", self._fernet.encrypt(password.encode()) if password else None)
 

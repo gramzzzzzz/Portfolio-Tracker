@@ -99,6 +99,11 @@ CREATE TABLE IF NOT EXISTS gold_photos (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS gold_photos_item ON gold_photos(item_id);
+CREATE TABLE IF NOT EXISTS mail_synced (
+    message_id TEXT PRIMARY KEY,
+    batch_id TEXT,
+    synced_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -316,6 +321,16 @@ class Repository:
 
     def photo_sha_in_use(self, sha256: str) -> bool:
         return bool(self._q("SELECT 1 FROM gold_photos WHERE sha256=? LIMIT 1", (sha256,)))
+
+    # --------------------------------------------------------- email sync
+    def add_mail_synced(self, message_ids: list[str], batch_id: str) -> None:
+        with self.tx() as c:
+            for m in message_ids:
+                c.execute("INSERT INTO mail_synced(message_id,batch_id,synced_at) VALUES(?,?,?) ON CONFLICT(message_id) "
+                          "DO UPDATE SET batch_id=excluded.batch_id, synced_at=excluded.synced_at", (m, batch_id, time.time()))
+
+    def mail_synced(self) -> list[dict]:
+        return [dict(r) for r in self._q("SELECT * FROM mail_synced")]
 
     # --------------------------------------------------------------- audit
     def audit(self, action: str, detail: dict) -> None:

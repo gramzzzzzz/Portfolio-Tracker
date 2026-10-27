@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, download, type Batch, type ImportItem, type PlanResult } from "../api";
 import { useApp } from "../App";
+import { EmailSyncCard } from "../components/Email";
 import { Alert, Badge, Card, Empty, Icon, Modal, Spinner, useAsync, useToast } from "../components/ui";
 import { bytes, date, dateTime, money, qty } from "../format";
 
@@ -137,6 +138,7 @@ function Upload() {
           </div>
         </Card>
       </div>
+      <EmailSyncCard />
       <Card title="Recent imports" pad={false}>
         {recent.data && recent.data.length ? (
           <table className="t">
