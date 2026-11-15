@@ -16,3 +16,9 @@ services:
       PT_COOKIE_SECURE: "false"  # true when served over HTTPS (reverse proxy)
       PUID: "10001"              # user/group the app runs as and owns ./data
       PGID: "10001"
+    networks:
+      - shared
+
+networks:
+  shared:
+    external: true
