@@ -125,6 +125,7 @@ export default function SettingsPage() {
           {num("cess_pct", "Health & education cess (%)", undefined, "1")}
           {num("equity_lt_months", "Shares / equity ETFs: long term after (months)", "12 under current rules", "1")}
           {num("upcoming_lt_window_days", "Show lots turning LT within (days)", undefined, "5")}
+          {num("xirr_min_old_money_pct", "Show portfolio XIRR when this % of money is 1 year old", "Below this the XIRR is hidden: it would mostly annualise recent purchases", "5")}
         </div>
         <h3 style={{ margin: "18px 0 8px" }}>Securities transaction tax (STT)</h3>
         <div className="grid g-kpi">

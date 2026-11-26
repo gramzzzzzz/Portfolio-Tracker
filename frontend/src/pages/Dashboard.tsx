@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Bar as RBar, BarChart, CartesianGrid, Cell, Line, ComposedChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { api, type Overview } from "../api";
+import { api, type AllocRow, type Holding, type Overview } from "../api";
 import { useApp } from "../App";
 import { PerformanceSummary } from "../components/Performance";
 import { Alert, Badge, Bar, Card, Empty, Kpi, PALETTE, Spinner, useAsync } from "../components/ui";
@@ -68,7 +69,7 @@ export default function Dashboard() {
           hint="Annualised return that accounts for when each purchase was made"
           value={pct(kpis.xirr, 1, true)}
           valueClass={tone(kpis.xirr)}
-          sub={kpis.xirr === null ? "shown once purchases span a year" : "money-weighted, annualised"}
+          sub={kpis.xirr === null ? `hidden: only ${kpis.xirr_old_money_pct ?? 0}% of your money is over a year old` : `money-weighted, annualised · ${kpis.xirr_old_money_pct}% of money over a year old`}
         />
         {kpis.day_change !== null && (
           <Kpi label="Today" value={signedMoney(kpis.day_change)} valueClass={tone(kpis.day_change)} sub={pct(kpis.day_change_pct, 2, true)} />
@@ -116,30 +117,7 @@ export default function Dashboard() {
           </div>
         </Card>
 
-        <Card title="Sector allocation" subtitle="Share of current value">
-          <div style={{ height: 190 }}>
-            <ResponsiveContainer>
-              <PieChart>
-                <Pie data={allocation.sector} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={1} stroke="none">
-                  {allocation.sector.map((_, i) => (
-                    <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(v) => money(Number(v))} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="legend">
-            {allocation.sector.map((s, i) => (
-              <div className="legend-row" key={s.name}>
-                <i style={{ background: PALETTE[i % PALETTE.length] }} />
-                <span>{s.name}</span>
-                <span className="muted mono">{compactMoney(s.value)}</span>
-                <span className="mono" style={{ minWidth: 48, textAlign: "right" }}>{pct(s.weight, 1)}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
+        <SectorCard sectors={allocation.sector} holdings={holdings} />
       </div>
 
       <PerformanceSummary />
@@ -213,3 +191,64 @@ export default function Dashboard() {
   );
 }
 
+
+/** Sector pie; click a slice (or its legend row) to see that sector's stocks, click again / Back to return. */
+function SectorCard({ sectors, holdings }: { sectors: AllocRow[]; holdings: Holding[] }) {
+  const [sector, setSector] = useState<string | null>(null);
+  const inSector = sector ? holdings.filter((h) => (h.sector || "Unassigned") === sector && (h.value || 0) > 0) : [];
+  const total = inSector.reduce((a, h) => a + (h.value || 0), 0);
+  const rows: { name: string; value: number; weight: number | null }[] = sector
+    ? inSector.sort((a, b) => (b.value || 0) - (a.value || 0)).map((h) => ({ name: h.name, value: h.value || 0, weight: total ? ((h.value || 0) / total) * 100 : null }))
+    : sectors;
+  const colour = sector ? sectors.findIndex((x) => x.name === sector) : -1;
+  const open = (name: string) => !sector && setSector(name);
+  return (
+    <Card
+      title={sector ? `${sector}` : "Sector allocation"}
+      subtitle={sector ? `Stocks in this sector, share of ${compactMoney(total)}` : "Share of current value · click a sector to see its stocks"}
+      actions={sector ? <button className="btn sm" onClick={() => setSector(null)}>← All sectors</button> : undefined}
+    >
+      <div style={{ height: 190 }} className="pie-wrap">
+        <ResponsiveContainer>
+          <PieChart accessibilityLayer={false} tabIndex={-1}>
+            <Pie
+              data={rows}
+              dataKey="value"
+              nameKey="name"
+              innerRadius={55}
+              outerRadius={85}
+              paddingAngle={1}
+              stroke="none"
+              isAnimationActive={false}
+              style={{ cursor: sector ? "default" : "pointer" }}
+              onClick={(d) => open(String((d as { name?: string }).name))}
+            >
+              {rows.map((_, i) => (
+                <Cell key={i} fill={PALETTE[(sector ? i + Math.max(colour, 0) : i) % PALETTE.length]} />
+              ))}
+            </Pie>
+            <Tooltip formatter={(v) => money(Number(v))} />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="legend">
+        {rows.map((r, i) => (
+          <div
+            className="legend-row"
+            key={r.name}
+            style={{ cursor: sector ? "default" : "pointer" }}
+            role={sector ? undefined : "button"}
+            tabIndex={sector ? undefined : 0}
+            onClick={() => open(r.name)}
+            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open(r.name))}
+          >
+            <i style={{ background: PALETTE[(sector ? i + Math.max(colour, 0) : i) % PALETTE.length] }} />
+            <span>{r.name}</span>
+            <span className="muted mono">{compactMoney(r.value)}</span>
+            <span className="mono" style={{ minWidth: 48, textAlign: "right" }}>{pct(r.weight, 1)}</span>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}

@@ -56,9 +56,13 @@ export function Card({ title, subtitle, actions, children, pad = true }: { title
 export function Kpi({ label, value, sub, valueClass, hint }: { label: string; value: ReactNode; sub?: ReactNode; valueClass?: string; hint?: string }) {
   return (
     <div className="card kpi">
-      <div className="label" title={hint}>
+      <div className="label">
         {label}
-        {hint && <span className="muted" aria-label={hint}>ⓘ</span>}
+        {hint && (
+          <span className="tip muted" tabIndex={0} role="note" data-tip={hint} aria-label={hint}>
+            ⓘ
+          </span>
+        )}
       </div>
       <div className={`value ${valueClass || ""}`}>{value}</div>
       {sub && <div className="sub">{sub}</div>}

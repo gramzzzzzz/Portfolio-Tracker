@@ -99,6 +99,15 @@ CREATE TABLE IF NOT EXISTS gold_photos (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS gold_photos_item ON gold_photos(item_id);
+CREATE TABLE IF NOT EXISTS gold_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL,
+    stored_name TEXT NOT NULL,
+    filename TEXT,
+    size INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS gold_receipts_item ON gold_receipts(item_id);
 CREATE TABLE IF NOT EXISTS mail_synced (
     message_id TEXT PRIMARY KEY,
     batch_id TEXT,
@@ -248,6 +257,14 @@ class Repository:
         d["data"] = json.loads(d.pop("data_json"))
         return d
 
+    def kept_upload_shas(self, exclude_id: str) -> set[str]:
+        """PDF hashes that other batches keep on disk."""
+        keep: set[str] = set()
+        for r in self._q("SELECT data_json FROM import_batches WHERE id<>?", (exclude_id,)):
+            data = json.loads(r["data_json"])
+            keep.update(f["sha256"] for f in data.get("files", []) if f.get("sha256") and f.get("stored", True))
+        return keep
+
     def batches(self, limit: int = 50) -> list[dict]:
         out = []
         for r in self._q("SELECT * FROM import_batches ORDER BY created_at DESC LIMIT ?", (limit,)):
@@ -318,6 +335,21 @@ class Repository:
 
     def delete_gold_photo(self, photo_id: int) -> None:
         self._x("DELETE FROM gold_photos WHERE id=?", (photo_id,))
+
+    # --------------------------------------------------------- gold receipts
+    def add_gold_receipt(self, item_id: str, stored_name: str, filename: str | None, size: int) -> int:
+        return self._x("INSERT INTO gold_receipts(item_id,stored_name,filename,size,created_at) VALUES(?,?,?,?,?)",
+                       (item_id, stored_name, filename, size, time.time()))
+
+    def gold_receipts(self, item_id: str) -> list[dict]:
+        return [dict(r) for r in self._q("SELECT * FROM gold_receipts WHERE item_id=? ORDER BY id", (item_id,))]
+
+    def gold_receipt(self, receipt_id: int) -> dict | None:
+        rows = self._q("SELECT * FROM gold_receipts WHERE id=?", (receipt_id,))
+        return dict(rows[0]) if rows else None
+
+    def delete_gold_receipt(self, receipt_id: int) -> None:
+        self._x("DELETE FROM gold_receipts WHERE id=?", (receipt_id,))
 
     def photo_sha_in_use(self, sha256: str) -> bool:
         return bool(self._q("SELECT 1 FROM gold_photos WHERE sha256=? LIMIT 1", (sha256,)))

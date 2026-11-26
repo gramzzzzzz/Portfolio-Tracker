@@ -77,7 +77,7 @@ def build(config: Config, *, price_provider=..., sheet_dao=None, reader=None, gm
             log.error("Could not seed sheet: %s", e)
     transactions = TransactionsService(versions, extras_dao, portfolio)
     gold = GoldService(repo, versions, extras_dao, portfolio, prices, settings,
-                       BlobStore(config.data_dir / "photos", ".img"))
+                       BlobStore(config.data_dir / "photos", ".img"), config.data_dir / "gold_receipts")
     gold.tax = tax
     tax.gold = gold
     price_sync.gold = gold

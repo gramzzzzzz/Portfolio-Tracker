@@ -139,9 +139,14 @@ def test_sync_downloads_pdfs_and_stages_an_import(env):
     # second sync: those emails were already synced -> nothing to do
     again = c.email.sync(None, None, None, False)
     assert again["batch"] is None and again["summary"]["emails_skipped_already_synced"] == 3
-    # discarding the import makes those emails eligible again
+    # PDFs are kept like any upload, except the duplicate of an already-seen note
+    notes = c.config.uploads_dir
+    assert len(list(notes.iterdir())) == 1
+    # discarding the import makes those emails eligible again; nothing extra piles up
     c.imports.discard(b["id"])
-    assert c.email.sync(None, None, None, False)["summary"]["pdfs"] == 2
+    out2 = c.email.sync(None, None, None, False)
+    assert out2["summary"]["pdfs"] == 2
+    assert len(list(notes.iterdir())) == 1
 
 
 def test_custom_query_is_remembered(env):
@@ -188,3 +193,13 @@ def test_api_routes(app_client, sheet_bytes, tmp_path):
     resp = c.get("/api/email/oauth/callback?code=x&state=forged", follow_redirects=False)
     assert resp.status_code == 303 and "email_error=" in resp.headers["location"]
     assert c.post("/api/email/sync", json={}).status_code == 422  # not connected
+
+
+def test_source_endpoint_shows_real_code(app_client):
+    from tests.test_api import login
+    c = app_client
+    login(c)
+    secs = c.get("/api/email/source").json()["sections"]
+    text = "\n".join(s["code"] for s in secs)
+    assert "gmail.readonly" in text and "def sync(" in text and "def attachment(" in text and "def _drop_duplicate_files(" in text
+    assert "messages/send" not in text and "trash" not in text.lower()  # read-only

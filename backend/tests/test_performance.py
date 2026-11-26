@@ -117,3 +117,22 @@ def test_flow_on_a_holiday_period_start_is_counted(tmp_path, sheet_bytes):
     assert w["from"] == (start + dt.timedelta(days=12)).isoformat()
     assert w["net_invested"] == pytest.approx(-30 * 101.68, abs=0.01)
     assert w["md_pct"] == pytest.approx(0.0, abs=0.01)  # flat price: selling at market is not a loss
+
+
+def test_portfolio_xirr_needs_enough_old_money():
+    import datetime as dt
+    from app.services.analytics_service import portfolio_xirr
+    today = dt.date(2026, 11, 1)
+    old, new = today - dt.timedelta(days=400), today - dt.timedelta(days=60)
+    # 6 old holdings of 5,000 and 4 new of 1,00,000: most holdings are old, but only ~7% of the money
+    inv = [(old, 5000.0)] * 6 + [(new, 100000.0)] * 4
+    flows = [(d, -a) for d, a in inv] + [(today, 450000.0)]
+    x, share = portfolio_xirr(flows, inv, today, 50)
+    assert x is None and round(share) == 7
+    # one big old position and a tiny new one: ~91% of the money is old -> shown
+    inv2 = [(old, 100000.0), (new, 10000.0)]
+    flows2 = [(d, -a) for d, a in inv2] + [(today, 125000.0)]
+    x2, share2 = portfolio_xirr(flows2, inv2, today, 50)
+    assert x2 is not None and round(share2) == 91
+    # the threshold is a setting
+    assert portfolio_xirr(flows2, inv2, today, 95)[0] is None

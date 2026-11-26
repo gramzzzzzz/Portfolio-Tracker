@@ -142,3 +142,47 @@ def test_photos(app):
     app.gold.delete(gid)  # deleting the item removes its photos
     with pytest.raises(KeyError):
         app.gold.photo(pid)
+
+
+PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
+
+
+def test_receipts(app, tmp_path):
+    gid = app.gold.add(GoldItem("", D(2023, 5, 1), "Lakshmi coin / 10g", "coin", "24K", 10, 60000))["items"][0]["id"]
+    r = app.gold.add_receipt(gid, PDF, "Bill #1.pdf")
+    files = sorted(p.name for p in (tmp_path / "gold_receipts").iterdir())
+    assert files == [f"2023-05-01_Lakshmi-coin-10g_{gid}_Bill-1.pdf"]  # readable name, plain file
+    assert (tmp_path / "gold_receipts" / files[0]).read_bytes() == PDF
+    assert app.gold.receipt(r["id"]) == (PDF, "Bill #1.pdf")
+    assert app.gold.overview()["items"][0]["receipts"] == [{"id": r["id"], "filename": "Bill #1.pdf", "size": len(PDF)}]
+    app.gold.add_receipt(gid, PDF, "Bill #1.pdf")  # same name again: never overwrites
+    assert len(list((tmp_path / "gold_receipts").iterdir())) == 2
+    for bad in (PNG, b"<html>%PDF-</html>", b""):
+        with pytest.raises(ValueError):
+            app.gold.add_receipt(gid, bad, "x.pdf")
+    with pytest.raises(KeyError):
+        app.gold.add_receipt("nope", PDF, "x.pdf")
+    app.gold.delete_receipt(r["id"])
+    assert len(list((tmp_path / "gold_receipts").iterdir())) == 1
+    app.gold.delete(gid)  # removing the item removes its receipts
+    assert list((tmp_path / "gold_receipts").iterdir()) == []
+
+
+def test_receipts_api(app_client, sheet_bytes):
+    from tests.test_api import login, upload_sheet
+    c = app_client
+    login(c)
+    upload_sheet(c, sheet_bytes)
+    body = {"date": "2023-05-01", "description": "Coin", "form": "coin", "purity": "24K", "weight_g": 10, "amount_paid": 60000}
+    r = c.post("/api/gold", json=body).json()
+    gid = r["added_id"]
+    up = c.post(f"/api/gold/{gid}/receipts", files={"file": ("bill.pdf", PDF, "application/pdf")})
+    assert up.status_code == 200
+    rid = up.json()["id"]
+    got = c.get(f"/api/gold/receipts/{rid}")
+    assert got.content == PDF and got.headers["content-type"] == "application/pdf"
+    assert got.headers["x-content-type-options"] == "nosniff"
+    assert c.post(f"/api/gold/{gid}/receipts", files={"file": ("x.pdf", PNG, "application/pdf")}).status_code == 422
+    assert c.post("/api/gold/nope/receipts", files={"file": ("x.pdf", PDF, "application/pdf")}).status_code == 404
+    assert c.delete(f"/api/gold/receipts/{rid}").status_code == 200
+    assert c.get(f"/api/gold/receipts/{rid}").status_code == 404

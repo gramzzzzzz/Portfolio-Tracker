@@ -105,6 +105,10 @@ h3 { font-size: 14px; }
 
 .kpi { padding: 16px 18px; }
 .kpi .label { color: var(--muted); font-size: 12.5px; font-weight: 500; display: flex; gap: 6px; align-items: center; }
+.tip { position: relative; cursor: help; outline: none; }
+.tip::after { content: attr(data-tip); display: none; position: absolute; z-index: 50; top: calc(100% + 6px); left: -8px; width: 250px; padding: 8px 10px; border-radius: 8px; background: #111827; color: #fff; font-size: 12px; font-weight: 400; line-height: 1.4; box-shadow: 0 6px 20px rgba(0,0,0,.2); white-space: normal; pointer-events: none; }
+.tip:hover::after, .tip:focus::after { display: block; }
+.g-kpi > .kpi:nth-last-child(-n+2) .tip::after { left: auto; right: -8px; }
 .kpi .value { font-size: 22px; font-weight: 650; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .kpi .sub { margin-top: 4px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
@@ -223,3 +227,8 @@ details summary { cursor: pointer; }
 .waterfall { display: grid; gap: 6px; }
 .wf-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; font-size: 13.5px; }
 .wf-row.total { font-weight: 650; border-top: 1px solid var(--border); padding-top: 6px; }
+
+/* charts: no focus/selection rectangle on slices or the chart surface */
+.recharts-wrapper, .recharts-wrapper *, .recharts-surface { outline: none !important; }
+.recharts-sector:focus, .recharts-layer:focus { outline: none !important; }
+.recharts-wrapper svg * { -webkit-tap-highlight-color: transparent; }

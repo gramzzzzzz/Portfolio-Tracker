@@ -191,9 +191,35 @@ export function EmailSettings() {
               Save search
             </button>
           </div>
+          <SourceCode />
         </div>
       </Card>
     </section>
+  );
+}
+
+/** The exact code used to fetch contract notes, read from the running server. */
+function SourceCode() {
+  const [open, setOpen] = useState(false);
+  const { data, error } = useAsync(() => (open ? api.get<{ sections: { title: string; file: string; code: string }[] }>("/api/email/source") : Promise.resolve(null)), [open]);
+  return (
+    <details onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary className="small">Show the code that fetches your contract notes</summary>
+      <div className="stack" style={{ marginTop: 8 }}>
+        <p className="muted small" style={{ margin: 0 }}>
+          This is the actual source running on this server, not a description of it. It only reads: it searches your mailbox, opens matching emails and downloads their PDF attachments. It cannot send, delete or change email.
+        </p>
+        {error && <Alert tone="neg">{error.message}</Alert>}
+        {data?.sections.map((x) => (
+          <div key={x.title}>
+            <strong className="small">{x.title}</strong> <span className="muted small">· {x.file}</span>
+            <pre className="code" style={{ maxHeight: 360, overflow: "auto", padding: 10, margin: "4px 0 0", background: "var(--bg-soft, #f5f6f8)", borderRadius: 8, fontSize: 12, lineHeight: 1.45 }}>
+              <code>{x.code}</code>
+            </pre>
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 

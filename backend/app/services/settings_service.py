@@ -33,6 +33,8 @@ DEFAULTS: dict[str, Any] = {
     "sell_expense_pct": None,
     "dp_charge_per_sale": 0.0,
     "upcoming_lt_window_days": 60,
+    # portfolio XIRR is shown only if at least this % of the invested money is a year old or more
+    "xirr_min_old_money_pct": 50,
     # listed shares / equity ETFs & funds: long term after this many months
     "equity_lt_months": 12,
     # STT (securities transaction tax), % of value; not deductible from gains

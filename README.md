@@ -8,7 +8,7 @@ The workbook is the source of truth. The app writes to it in exactly two ways:
 
 It also keeps two **extra sheets** of its own in the same workbook, added after your sheet. Writing them never changes your original sheet: after every write the app checks byte-for-byte that the original sheet's XML, the shared strings and the calc chain are unchanged, and aborts otherwise.
 - **`Transactions`**: sales (from contract notes or entered by hand), bonus shares and splits. Holdings, P&L and tax use them automatically: units sold are taken oldest first, bonus shares are dated on allotment at zero cost.
-- **`Gold`**: physical gold (coins, bars, jewellery) entered by hand, with the current rate and value refreshed by the price sync. Photos of items are kept in `data/photos/`.
+- **`Gold`**: physical gold (coins, bars, jewellery) entered by hand, with the current rate and value refreshed by the price sync. Photos of items are kept in `data/photos/`. Purchase receipts (PDF) are kept as plain, readable files in `data/gold_receipts/` (named `<purchase date>_<description>_<item id>_<original name>.pdf`), so you can open or back them up without the app.
 
 ## Run on a home server
 
@@ -28,7 +28,7 @@ The image runs the test suite while it builds, so a broken build never produces 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PT_DATA_DIR` | `/data` | Sheet versions, SQLite metadata, uploaded notes, gold photos, secret key |
+| `PT_DATA_DIR` | `/data` | Sheet versions, SQLite metadata, uploaded notes, gold photos, gold receipts, secret key |
 | `PT_SEED_SHEET` | `/seed/Invt.xlsx` | Workbook imported as version 1 when no sheet exists (missing file = ignored) |
 | `PT_LIVE_PRICES` | `true` | Live quotes (Yahoo Finance). `false` = offline: the app uses the market rates already in the sheet |
 | `PT_PRICE_SYNC_MINUTES` | `60` | Default interval for writing prices into the sheet (also editable in Settings). `0` disables the background sync |
@@ -83,7 +83,7 @@ Security: one user, one password. Login attempts are rate-limited, cookies are H
 1. **Import notes.** Drop one or more contract-note PDFs and enter the password once. It can be stored encrypted for next time. Every file in one upload uses the same password.
 2. **Review.** Each transaction is checked against the rows already in the sheet, including rows you typed in by hand, and labelled *New*, *Already in sheet* or *Possible duplicate*. For a new security, pick an existing sector or add a new one.
 3. **Preview → Write.** You see exactly which rows will be inserted and the result of the safety checks. Confirming creates a new sheet version.
-   **Or sync from email:** connect Gmail once (Settings → Email), then use **Import notes → Sync from email**. The app searches your inbox (default search `cnb 11 contract`, editable), downloads the PDF attachments to a temporary folder and opens them in the same review screen. Emails already imported are skipped.
+   **Or sync from email:** connect Gmail once (Settings → Email), then use **Import notes → Sync from email**. The app searches your inbox (default search `cnb 11 contract`, editable), downloads the PDF attachments to a temporary folder and opens them in the same review screen. Emails already imported are skipped. Fetched PDFs are kept in `data/contract_notes/` like any uploaded note, except duplicates: a note already in the sheet, or a second copy of a note in the same import, is not stored. Settings → Email has an expandable "Show the code that fetches your contract notes" section that displays the actual source.
 4. **Sales, bonus shares, gold.** Sales in contract notes are imported to the Transactions sheet. Record bonus shares, splits or sales from elsewhere on **Investment history → Sales, bonus & splits**, and physical gold on **Physical gold**. Gold prices, buy-back deductions and tax rules are editable in **Settings**.
 5. **Sheet history.** Download any version, see what changed in it, restore it (a restore is saved as a new version), or upload a copy you edited in Excel.
 

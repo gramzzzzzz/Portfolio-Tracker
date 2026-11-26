@@ -103,6 +103,7 @@ class ImportService:
                                    "status": "pending"})
         self._parse_files(batch, pw)
         self._classify(batch)
+        self._drop_duplicate_files(batch_id, batch)
         self.repo.save_batch(batch_id, "staged", head, batch)
         self.repo.audit("import.stage", {"batch": batch_id, "files": [f["filename"] for f in batch["files"]]})
         return self.view(batch_id)
@@ -118,6 +119,7 @@ class ImportService:
                 f["status"] = "pending"
         self._parse_files(batch, pw)
         self._classify(batch)
+        self._drop_duplicate_files(batch_id, batch)
         self.repo.save_batch(batch_id, "staged", self.versions.head_id(), batch)
         return self.view(batch_id)
 
@@ -306,6 +308,26 @@ class ImportService:
     def discard(self, batch_id: str) -> None:
         b = self._load(batch_id, staged=True)
         self.repo.save_batch(batch_id, "discarded", b["base_version_id"], b["data"])
+
+    def _drop_duplicate_files(self, batch_id: str, batch: dict) -> None:
+        """Do not keep PDFs that add nothing: a second copy of a note already in this upload, or a
+        note whose every trade is already in the sheet. (Identical bytes are stored once anyway.)
+        Files that failed to parse are kept, so they can be retried with another password."""
+        keep = self.repo.kept_upload_shas(batch_id)
+        items_by_file: dict[str, list[dict]] = {}
+        for it in batch["items"]:
+            items_by_file.setdefault(it["file_id"], []).append(it)
+        for f in batch["files"]:
+            its = items_by_file.get(f["id"], [])
+            dup = f["status"] == "duplicate_file" or (
+                f["status"] == "parsed" and its and all(i["status"] == "duplicate" for i in its))
+            if not dup or not f.get("stored", True):
+                continue
+            # a duplicate_file shares its note with another file of the batch; never drop a sha another file needs
+            shared = any(g is not f and g["sha256"] == f["sha256"] and g["status"] != "duplicate_file" for g in batch["files"])
+            if f["sha256"] not in keep and not shared:
+                self.uploads.delete(f["sha256"])
+            f["stored"] = False
 
     def refresh(self, batch_id: str) -> dict:
         b = self._load(batch_id, staged=True)

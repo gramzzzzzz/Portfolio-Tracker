@@ -11,7 +11,7 @@ export interface PeriodRow {
 }
 export interface Performance {
   available: boolean; reason?: string; series_available?: boolean; series_reason?: string; benchmark_symbol: string;
-  summary: { total_pnl: number; unrealised: number; realised: number; total_invested: number; total_withdrawn: number; value: number; simple_return_pct: number | null; md_since_start_pct: number | null; xirr_pct: number | null; twr_since_start_pct?: number | null; days: number; start: string };
+  summary: { total_pnl: number; unrealised: number; realised: number; total_invested: number; total_withdrawn: number; value: number; simple_return_pct: number | null; md_since_start_pct: number | null; xirr_pct: number | null; xirr_old_money_pct?: number | null; twr_since_start_pct?: number | null; days: number; start: string };
   contributors: { name: string; unrealised: number; realised: number; total: number; value: number }[];
   periods?: PeriodRow[];
   max_drawdown?: { pct: number; peak: string | null; trough: string | null } | null;
@@ -84,7 +84,7 @@ export function PerformancePanel() {
         />
         <Kpi label="Growth of your picks" value={pct(s.twr_since_start_pct, 2, true)} valueClass={tone(s.twr_since_start_pct)} sub="time-weighted: ignores when and how much you added" hint="Comparable with an index: what ₹100 invested at the start would have become" />
         <Kpi label="Biggest fall from a peak" value={p.max_drawdown ? pct(p.max_drawdown.pct, 1) : "—"} valueClass={p.max_drawdown && p.max_drawdown.pct < 0 ? "neg" : ""} sub={p.max_drawdown?.peak ? `${date(p.max_drawdown.peak)} → ${date(p.max_drawdown.trough)}` : "max drawdown"} />
-        <Kpi label="XIRR" value={pct(s.xirr_pct, 1, true)} valueClass={tone(s.xirr_pct)} sub={s.xirr_pct === null ? `available after a year (${s.days} days so far)` : "annualised, money-weighted"} />
+        <Kpi label="XIRR" value={pct(s.xirr_pct, 1, true)} valueClass={tone(s.xirr_pct)} sub={s.xirr_pct === null ? `hidden: only ${s.xirr_old_money_pct ?? 0}% of your money is over a year old` : "annualised, money-weighted"} />
       </div>
 
       {p.series_available === false && <Alert tone="info">{p.series_reason}. Totals above still work.</Alert>}

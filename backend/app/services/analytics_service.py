@@ -21,6 +21,28 @@ from app.services.settings_service import SettingsService
 MIN_XIRR_DAYS = 365  # annualising shorter periods produces misleading numbers
 
 
+def old_money_share(invested: list[tuple[dt.date, float]], as_of: dt.date) -> float | None:
+    """Fraction (0-1) of the money put in that has been invested for at least MIN_XIRR_DAYS."""
+    total = sum(a for d, a in invested if d and a > 0)
+    if total <= 0:
+        return None
+    old = sum(a for d, a in invested if d and a > 0 and (as_of - d).days >= MIN_XIRR_DAYS)
+    return old / total
+
+
+def portfolio_xirr(flows, invested: list[tuple[dt.date, float]], as_of: dt.date, min_share_pct: float):
+    """Portfolio-level XIRR, hidden unless enough of the money has a year of history.
+
+    Like Zerodha Console (which hides it when most investments are under a year), but weighted by
+    amount rather than by number of holdings. Returns (xirr or None, share of money >= 1 year, 0-100).
+    """
+    share = old_money_share(invested, as_of)
+    pct = None if share is None else share * 100
+    if pct is None or pct + 1e-9 < min_share_pct:
+        return None, pct
+    return xirr(flows), pct
+
+
 def xirr(flows):
     ds = [d for d, a in flows if d and a]
     if not ds or (max(ds) - min(ds)).days < MIN_XIRR_DAYS:
@@ -143,6 +165,8 @@ class AnalyticsService:
         value = sum(v.value for v in views)
         flows = [(v.lot.date, -v.lot.cost) for v in views if v.lot.date] + [(as_of, value)] + self._realised_flows()
         holdings = self._holdings(views, quotes, symbols, as_of, value)
+        px, old_pct = portfolio_xirr(flows, [(v.lot.date, v.lot.cost) for v in views], as_of,
+                                     float(self.settings.get("xirr_min_old_money_pct")))
         day_change = None
         if any_live:
             dc = 0.0
@@ -165,7 +189,8 @@ class AnalyticsService:
             "kpis": {
                 "invested": _r(invested), "value": _r(value), "gain": _r(value - invested),
                 "gain_pct": _r((value / invested - 1) * 100 if invested else None),
-                "xirr": _r(xirr(flows) * 100 if xirr(flows) is not None else None),
+                "xirr": _r(px * 100 if px is not None else None),
+                "xirr_old_money_pct": _r(old_pct, 0),
                 "day_change": _r(day_change),
                 "day_change_pct": _r(day_change / (value - day_change) * 100 if day_change is not None and value - day_change else None),
                 "holdings": len(holdings), "lots": len(views),

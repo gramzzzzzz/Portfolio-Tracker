@@ -28,7 +28,7 @@ import math
 from collections import defaultdict
 
 from app.services import positions as P
-from app.services.analytics_service import xirr
+from app.services.analytics_service import portfolio_xirr
 from app.services.finance import add_months, fy_bounds
 
 
@@ -127,13 +127,15 @@ class PerformanceService:
 
         # since inception (needs only cash flows and today's value)
         md_all = modified_dietz(0.0, value_now, [(d, a) for d, a, _ in flows], start, today)
-        x = xirr([(d, -a) for d, a, _ in flows] + [(today, value_now)])
+        x, old_pct = portfolio_xirr([(d, -a) for d, a, _ in flows] + [(today, value_now)], [(d, a) for d, a, _ in flows],
+                                    today, float(cfg["xirr_min_old_money_pct"]))
         summary = {
             "total_pnl": _r(unreal + realised), "unrealised": _r(unreal), "realised": _r(realised),
             "total_invested": _r(total_in), "total_withdrawn": _r(total_out), "value": _r(value_now),
             "simple_return_pct": _r((unreal + realised) / total_in * 100) if total_in else None,
             "md_since_start_pct": _r(md_all * 100) if md_all is not None else None,
             "xirr_pct": _r(x * 100) if x is not None else None,
+            "xirr_old_money_pct": _r(old_pct, 0),
             "days": span_days, "start": start.isoformat(),
         }
         contributors = []

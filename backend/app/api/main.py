@@ -20,7 +20,7 @@ from app.config import Config, load_config
 from app.container import Container, build
 from app.dao.base import LayoutError
 from app.services.finance import fy_label
-from app.services.import_service import ImportError_
+from app.services.import_service import ImportError_, ImportService
 from app.dao.mail.gmail import GmailError
 from app.services.email_sync_service import EmailSyncError
 from app.services.sheet_lock import LockTimeout
@@ -322,6 +322,29 @@ def create_app(config: Config | None = None, container: Container | None = None)
         # honours X-Forwarded-Proto/Host behind a reverse proxy (uvicorn --proxy-headers)
         return str(request.base_url).rstrip("/")
 
+    @api.get("/email/source")
+    def email_source():
+        """The exact code that talks to Gmail and fetches contract notes (read from the running source)."""
+        import inspect
+        import textwrap
+
+        from app.dao.mail import gmail as g
+        from app.services.email_sync_service import EmailSyncService as S
+
+        def src(*objs):
+            return "\n\n".join(textwrap.dedent(inspect.getsource(o)).rstrip() for o in objs)
+
+        return {"sections": [
+            {"title": "Google access: read-only scope and endpoints", "file": "app/dao/mail/gmail.py",
+             "code": "\n".join(f'{k} = "{getattr(g, k)}"' for k in ("AUTH_URL", "TOKEN_URL", "REVOKE_URL", "API", "SCOPE"))},
+            {"title": "Search the inbox, read an email, download an attachment", "file": "app/dao/mail/gmail.py",
+             "code": src(g.GmailClient._get, g.GmailClient.search, g.GmailClient.message, g.GmailClient.attachment)},
+            {"title": "The sync itself: which emails, which files, what happens to them", "file": "app/services/email_sync_service.py",
+             "code": src(S._full_query, S._is_pdf, S.sync)},
+            {"title": "Which downloaded PDFs are kept (duplicates are not)", "file": "app/services/import_service.py",
+             "code": src(ImportService._drop_duplicate_files)},
+        ]}
+
     @api.get("/email/status")
     def email_status(request: Request):
         st = c.email.status()
@@ -422,6 +445,27 @@ def create_app(config: Config | None = None, container: Container | None = None)
             return c.gold.add_photo(item_id, data, file.filename)
         except ValueError as e:
             raise HTTPException(422, str(e))
+
+    @api.post("/gold/{item_id}/receipts")
+    async def gold_receipt_add(item_id: str, file: UploadFile = File(...)):
+        data = await file.read(15 * 1024 * 1024 + 1)
+        try:
+            return c.gold.add_receipt(item_id, data, file.filename)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @api.get("/gold/receipts/{receipt_id}")
+    def gold_receipt(receipt_id: int):
+        data, name = c.gold.receipt(receipt_id)
+        safe = "".join(ch for ch in name if ch.isascii() and ch.isprintable() and ch not in '"\\') or "receipt.pdf"
+        return Response(data, media_type="application/pdf",
+                        headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
+                                 "Content-Disposition": f'inline; filename="{safe}"'})
+
+    @api.delete("/gold/receipts/{receipt_id}")
+    def gold_receipt_delete(receipt_id: int):
+        c.gold.delete_receipt(receipt_id)
+        return {"ok": True}
 
     @api.get("/gold/photos/{photo_id}")
     def gold_photo(photo_id: int):

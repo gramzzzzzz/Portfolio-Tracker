@@ -16,7 +16,10 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import math
+import os
 import re
+import tempfile
+from pathlib import Path
 
 from app.dao.repo.blobs import BlobStore
 from app.dao.repo.sqlite_repo import Repository
@@ -33,6 +36,8 @@ log = logging.getLogger(__name__)
 TROY_OZ_G = 31.1034768
 FORMS = ("coin", "bar", "jewellery")
 MAX_PHOTO = 8 * 1024 * 1024
+MAX_RECEIPT = 15 * 1024 * 1024
+MAX_RECEIPTS = 10
 IMAGE_MAGIC = {b"\xff\xd8\xff": "image/jpeg", b"\x89PNG\r\n\x1a\n": "image/png", b"RIFF": "image/webp",
                b"GIF8": "image/gif"}
 
@@ -52,9 +57,14 @@ def sniff_image(data: bytes) -> str | None:
     return None
 
 
+def _slug(text: str, limit: int) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")[:limit].strip("-")
+
+
 class GoldService:
     def __init__(self, repo: Repository, versions: VersionService, extras: ExtraSheetsDAO,
-                 portfolio: PortfolioService, prices: PriceService, settings: SettingsService, photos: BlobStore):
+                 portfolio: PortfolioService, prices: PriceService, settings: SettingsService, photos: BlobStore,
+                 receipts_dir: Path | None = None):
         self.repo = repo
         self.versions = versions
         self.extras = extras
@@ -62,6 +72,7 @@ class GoldService:
         self.prices = prices
         self.settings = settings
         self.photos = photos
+        self.receipts_dir = receipts_dir  # plain, human-readable PDFs next to the sheet versions
         self.tax = None  # TaxService (attached by the container)
 
     # ------------------------------------------------------------------ price
@@ -149,6 +160,7 @@ class GoldService:
             "seller": item.seller, "remarks": item.remarks, "row": item.row,
             "sold_date": item.sold_date.isoformat() if item.sold_date else None, "sold_amount": _r(item.sold_amount),
             "photos": [{"id": p["id"], "filename": p["filename"]} for p in self.repo.gold_photos(item.id)],
+            "receipts": [{"id": r["id"], "filename": r["filename"], "size": r["size"]} for r in self.repo.gold_receipts(item.id)],
             "lt_date": self.lt_date(item).isoformat(),
         }
         if item.sold_date:
@@ -315,7 +327,9 @@ class GoldService:
         items = self.portfolio.state().extras.gold
         g.id = g.id or new_id("G")
         self._validate(g)
-        return self._commit(items + [g], f"Added gold: {g.description} ({g.weight_g:g} g {g.purity})")
+        out = self._commit(items + [g], f"Added gold: {g.description} ({g.weight_g:g} g {g.purity})")
+        out["added_id"] = g.id
+        return out
 
     def update(self, item_id: str, g: GoldItem) -> dict:
         items = self.portfolio.state().extras.gold
@@ -335,6 +349,8 @@ class GoldService:
         # photos only after the sheet write succeeded (they are not versioned)
         for p in self.repo.gold_photos(item_id):
             self.delete_photo(p["id"])
+        for r in self.repo.gold_receipts(item_id):
+            self.delete_receipt(r["id"])
         return out
 
     # --------------------------------------------------------------- photos
@@ -366,6 +382,63 @@ class GoldService:
         self.repo.delete_gold_photo(photo_id)
         if not self.repo.photo_sha_in_use(p["sha256"]):
             self.photos.delete(p["sha256"])
+
+    # ------------------------------------------------------------- receipts
+    def add_receipt(self, item_id: str, data: bytes, filename: str | None) -> dict:
+        """Store a purchase receipt PDF as a normal, readable file under ``gold_receipts/``.
+
+        File name: ``<purchase date>_<description>_<item id>_<original name>.pdf`` so the
+        folder can be browsed (or backed up) without the application.
+        """
+        item = next((i for i in self.portfolio.state().extras.gold if i.id == item_id), None)
+        if item is None:
+            raise KeyError(item_id)
+        if self.receipts_dir is None:
+            raise ValueError("Receipt storage is not configured")
+        if len(data) > MAX_RECEIPT:
+            raise ValueError("Receipt is larger than 15 MB")
+        if not data.lstrip()[:5] == b"%PDF-":
+            raise ValueError("Receipts must be PDF files")
+        if len(self.repo.gold_receipts(item_id)) >= MAX_RECEIPTS:
+            raise ValueError(f"At most {MAX_RECEIPTS} receipts per item")
+        orig = (filename or "receipt.pdf")[:120]
+        stem = _slug(Path(orig).stem, 40) or "receipt"
+        base = f"{item.date.isoformat()}_{_slug(item.description, 40) or 'gold'}_{item_id}_{stem}"
+        self.receipts_dir.mkdir(parents=True, exist_ok=True)
+        name, n = f"{base}.pdf", 1
+        while (self.receipts_dir / name).exists():
+            n += 1
+            name = f"{base}-{n}.pdf"
+        fd, tmp = tempfile.mkstemp(dir=self.receipts_dir, prefix=".tmp-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, self.receipts_dir / name)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        rid = self.repo.add_gold_receipt(item_id, name, orig, len(data))
+        self.repo.audit("gold.receipt.add", {"item": item_id, "receipt": rid, "file": name})
+        return {"id": rid, "filename": orig, "size": len(data)}
+
+    def receipt(self, receipt_id: int) -> tuple[bytes, str]:
+        r = self.repo.gold_receipt(receipt_id)
+        if not r or self.receipts_dir is None:
+            raise KeyError(receipt_id)
+        return (self.receipts_dir / r["stored_name"]).read_bytes(), r["filename"] or "receipt.pdf"
+
+    def delete_receipt(self, receipt_id: int) -> None:
+        r = self.repo.gold_receipt(receipt_id)
+        if not r:
+            raise KeyError(receipt_id)
+        self.repo.delete_gold_receipt(receipt_id)
+        if self.receipts_dir is not None:
+            (self.receipts_dir / r["stored_name"]).unlink(missing_ok=True)
+        self.repo.audit("gold.receipt.delete", {"item": r["item_id"], "receipt": receipt_id})
 
     # ------------------------------------------------------- price sync hook
     def refresh_sheet_values(self, data: bytes) -> bytes | None:

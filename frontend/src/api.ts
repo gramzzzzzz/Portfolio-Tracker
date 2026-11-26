@@ -170,6 +170,7 @@ export interface Overview {
     gain: number;
     gain_pct: number | null;
     xirr: number | null;
+    xirr_old_money_pct: number | null;
     day_change: number | null;
     day_change_pct: number | null;
     holdings: number;
@@ -294,6 +295,7 @@ export interface Settings {
   sell_expense_pct: number | null;
   dp_charge_per_sale: number;
   upcoming_lt_window_days: number;
+  xirr_min_old_money_pct: number;
   equity_lt_months: number;
   stt_buy_share_pct: number;
   stt_sell_share_pct: number;

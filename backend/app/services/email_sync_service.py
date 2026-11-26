@@ -245,7 +245,8 @@ class EmailSyncService:
                 batch = self.imports.stage(files, password, use_saved=True, save_password=save_password)
             except ImportError_ as e:
                 raise EmailSyncError(str(e)) from e
-        # temporary directory is gone here; staged copies live in data/contract_notes
+        # temporary directory is gone here; stage() keeps the PDFs in data/contract_notes like any
+        # upload, except duplicates (ImportService._drop_duplicate_files)
         self.repo.add_mail_synced(used_msgs, batch["id"])
         self.repo.audit("email.sync", {"query": q, "emails": len(used_msgs), "pdfs": len(files), "batch": batch["id"]})
         return {"batch": batch, "summary": summary}

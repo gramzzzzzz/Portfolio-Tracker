@@ -81,6 +81,8 @@ def test_full_import_flow(app_client, sheet_bytes, note_bytes, encrypted_note):
     assert b2["files"][0]["status"] == "parsed" and b2["files"][1]["status"] == "duplicate_file"
     assert b2["summary"]["duplicates"] == 2 and b2["summary"]["new"] == 0
     assert all(i["proposal"]["mode"] == "existing" for i in b2["items"])  # remembered ISIN -> sheet name
+    # duplicates are not kept on disk: only the first (already imported) copy of the note remains
+    assert len(list((app_client.app.state.container.config.data_dir / "contract_notes").iterdir())) == 1
 
     # diff / download / restore
     d = c.get(f"/api/versions/{vers[0]['id']}/diff").json()

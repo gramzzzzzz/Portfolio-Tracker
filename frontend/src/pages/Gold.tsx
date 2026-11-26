@@ -9,7 +9,7 @@ interface Step { section: string; label: string; amount: number | null; formula:
 interface Item {
   id: string; date: string; description: string; form: "coin" | "bar" | "jewellery"; purity: string; fineness: number; weight_g: number; fine_weight_g: number;
   amount_paid: number; making_charges: number; gst_paid: number; seller: string | null; remarks: string | null; sold_date: string | null; sold_amount: number | null;
-  photos: { id: number; filename: string }[]; lt_date: string; status: "held" | "sold"; days_held: number; term: "LT" | "ST"; days_to_lt?: number;
+  photos: { id: number; filename: string }[]; receipts: { id: number; filename: string; size: number }[]; lt_date: string; status: "held" | "sold"; days_held: number; term: "LT" | "ST"; days_to_lt?: number;
   rate_per_g?: number | null; market_value?: number | null; buyback_deduction_pct?: number; buyback_deduction?: number; sale_value?: number; gain?: number; gain_pct?: number | null;
   tax_if_sold?: number; net_if_sold?: number; after_tax_gain?: number; rate_pct?: number; paid_per_g?: number; computation?: { steps: Step[]; total: number };
   if_wait?: { date: string; tax: number; saved: number };
@@ -288,6 +288,15 @@ export default function Gold() {
   );
 }
 
+const MAX_RECEIPT_MB = 15;
+const isPdf = (f: File) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
+
+async function uploadReceipt(itemId: string, f: File) {
+  const fd = new FormData();
+  fd.append("file", f);
+  return api.form<{ id: number; filename: string; size: number }>(`/api/gold/${itemId}/receipts`, fd);
+}
+
 function priceSubtitle(p: Overview["price"]) {
   if (p.source === "live") return "Live international price plus the Indian premium; all values on this page use the price on the right";
   if (p.source === "manual") return "Your own 24K rate from Settings";
@@ -317,6 +326,33 @@ function Detail({ item: i, onClose, onEdit, onChanged }: { item: Item; onClose: 
   const ref = useRef<HTMLInputElement>(null);
   const [photos, setPhotos] = useState(i.photos);
   const [busy, setBusy] = useState(false);
+  const rref = useRef<HTMLInputElement>(null);
+  const [receipts, setReceipts] = useState(i.receipts || []);
+  const [rbusy, setRbusy] = useState(false);
+  const addReceipts = async (files: FileList | null) => {
+    if (!files) return;
+    setRbusy(true);
+    try {
+      for (const f of Array.from(files)) {
+        if (!isPdf(f)) throw new Error(`${f.name} is not a PDF`);
+        if (f.size > MAX_RECEIPT_MB * 1024 * 1024) throw new Error(`${f.name} is larger than ${MAX_RECEIPT_MB} MB`);
+        const r = await uploadReceipt(i.id, f);
+        setReceipts((x) => [...x, r]);
+        onChanged();
+      }
+    } catch (e) {
+      toast((e as Error).message, "neg");
+    } finally {
+      setRbusy(false);
+      if (rref.current) rref.current.value = "";
+    }
+  };
+  const removeReceipt = async (r: { id: number; filename: string }) => {
+    if (!confirm(`Delete receipt ${r.filename}?`)) return;
+    await api.send("DELETE", `/api/gold/receipts/${r.id}`);
+    setReceipts((x) => x.filter((y) => y.id !== r.id));
+    onChanged();
+  };
   const upload = async (files: FileList | null) => {
     if (!files) return;
     setBusy(true);
@@ -366,6 +402,29 @@ function Detail({ item: i, onClose, onEdit, onChanged }: { item: Item; onClose: 
             {busy ? "Uploading…" : "Add photo"}
           </button>
           <input ref={ref} type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/heic" multiple hidden onChange={(e) => upload(e.target.files)} />
+        </div>
+        <div className="stack" style={{ gap: 6 }}>
+          <strong className="small">Receipts (PDF)</strong>
+          {receipts.length === 0 && <span className="muted small">No receipts yet.</span>}
+          {receipts.map((r) => (
+            <div key={r.id} className="row" style={{ gap: 8 }}>
+              <Icon name="file" />
+              <a href={`/api/gold/receipts/${r.id}`} target="_blank" rel="noopener">
+                {r.filename}
+              </a>
+              <span className="muted small">{(r.size / 1024).toFixed(0)} KB</span>
+              <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => removeReceipt(r)} aria-label={`Delete receipt ${r.filename}`}>
+                <Icon name="x" />
+              </button>
+            </div>
+          ))}
+          <div>
+            <button className="btn sm" onClick={() => rref.current?.click()} disabled={rbusy}>
+              <Icon name="upload" />
+              {rbusy ? "Uploading…" : "Add receipt"}
+            </button>
+            <input ref={rref} type="file" accept="application/pdf,.pdf" multiple hidden onChange={(e) => addReceipts(e.target.files)} />
+          </div>
         </div>
         <dl className="kv">
           <dt>Form · purity</dt>
@@ -437,6 +496,13 @@ function GoldForm({ form, setForm, editing, purities, onClose, onDone }: { form:
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [sold, setSold] = useState(!!form.sold_date);
+  const [pdfs, setPdfs] = useState<File[]>([]);
+  const pick = (files: FileList | null) => {
+    const bad = Array.from(files || []).find((f) => !isPdf(f) || f.size > MAX_RECEIPT_MB * 1024 * 1024);
+    if (bad) setErr(`${bad.name}: receipts must be PDF files up to ${MAX_RECEIPT_MB} MB`);
+    else if (files) setErr("");
+    setPdfs((x) => [...x, ...Array.from(files || []).filter((f) => isPdf(f) && f.size <= MAX_RECEIPT_MB * 1024 * 1024)].slice(0, 10));
+  };
   const set = (k: keyof ReturnType<typeof blank>, v: string) => setForm({ ...form, [k]: v });
   const today = new Date().toISOString().slice(0, 10);
   const submit = async (e: FormEvent) => {
@@ -450,15 +516,24 @@ function GoldForm({ form, setForm, editing, purities, onClose, onDone }: { form:
       sold_date: sold && form.sold_date ? form.sold_date : null, sold_amount: sold && form.sold_amount ? Number(form.sold_amount) : null, remarks: form.remarks || null,
     };
     try {
-      await api.send(editing ? "PUT" : "POST", editing ? `/api/gold/${editing}` : "/api/gold", body);
-      onDone(editing ? "Gold item updated" : "Gold item added to the Gold sheet");
+      const r = await api.send<{ added_id?: string }>(editing ? "PUT" : "POST", editing ? `/api/gold/${editing}` : "/api/gold", body);
+      let failed = 0;
+      for (const f of pdfs) {
+        try {
+          if (r.added_id) await uploadReceipt(r.added_id, f);
+        } catch {
+          failed++;
+        }
+      }
+      const note = failed ? ` (${failed} receipt${failed > 1 ? "s" : ""} could not be saved, add them from the item)` : "";
+      onDone((editing ? "Gold item updated" : "Gold item added to the Gold sheet") + note);
     } catch (e) {
       setErr((e as Error).message);
       setBusy(false);
     }
   };
   const del = async () => {
-    if (!editing || !confirm("Remove this item and its photos?")) return;
+    if (!editing || !confirm("Remove this item, its photos and its receipts?")) return;
     await api.send("DELETE", `/api/gold/${editing}`);
     onDone("Gold item removed");
   };
@@ -552,7 +627,29 @@ function GoldForm({ form, setForm, editing, purities, onClose, onDone }: { form:
           <span>Remarks</span>
           <input className="input" value={form.remarks} onChange={(e) => set("remarks", e.target.value)} maxLength={300} />
         </label>
-        {!editing && <p className="muted small" style={{ margin: 0 }}>You can add photos after saving, by opening the item.</p>}
+        {!editing && (
+          <div className="stack" style={{ gap: 6 }}>
+            <span className="small">Receipts (PDF, optional)</span>
+            {pdfs.map((f, k) => (
+              <div key={k} className="row" style={{ gap: 8 }}>
+                <Icon name="file" />
+                <span>{f.name}</span>
+                <span className="muted small">{(f.size / 1024).toFixed(0)} KB</span>
+                <button type="button" className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => setPdfs((x) => x.filter((_, j) => j !== k))} aria-label={`Remove ${f.name}`}>
+                  <Icon name="x" />
+                </button>
+              </div>
+            ))}
+            <div>
+              <label className="btn sm" style={{ cursor: "pointer" }}>
+                <Icon name="upload" />
+                Choose PDF receipts
+                <input type="file" accept="application/pdf,.pdf" multiple hidden onChange={(e) => { pick(e.target.files); e.target.value = ""; }} />
+              </label>
+            </div>
+            <span className="muted small">Saved as plain files in the data/gold_receipts folder. Photos can be added after saving, by opening the item.</span>
+          </div>
+        )}
       </form>
     </Modal>
   );
