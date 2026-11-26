@@ -213,8 +213,8 @@ function SourceCode() {
         {data?.sections.map((x) => (
           <div key={x.title}>
             <strong className="small">{x.title}</strong> <span className="muted small">· {x.file}</span>
-            <pre className="code" style={{ maxHeight: 360, overflow: "auto", padding: 10, margin: "4px 0 0", background: "var(--bg-soft, #f5f6f8)", borderRadius: 8, fontSize: 12, lineHeight: 1.45 }}>
-              <code>{x.code}</code>
+            <pre className="code" style={{ maxHeight: 340, overflow: "auto", padding: 12, margin: "4px 0 0", background: "#0f172a", color: "#e2e8f0", borderRadius: 8, fontSize: 12, lineHeight: 1.5 }}>
+              <code style={{ color: "inherit", background: "transparent" }}>{x.code}</code>
             </pre>
           </div>
         ))}

@@ -335,14 +335,10 @@ def create_app(config: Config | None = None, container: Container | None = None)
             return "\n\n".join(textwrap.dedent(inspect.getsource(o)).rstrip() for o in objs)
 
         return {"sections": [
-            {"title": "Google access: read-only scope and endpoints", "file": "app/dao/mail/gmail.py",
-             "code": "\n".join(f'{k} = "{getattr(g, k)}"' for k in ("AUTH_URL", "TOKEN_URL", "REVOKE_URL", "API", "SCOPE"))},
-            {"title": "Search the inbox, read an email, download an attachment", "file": "app/dao/mail/gmail.py",
-             "code": src(g.GmailClient._get, g.GmailClient.search, g.GmailClient.message, g.GmailClient.attachment)},
-            {"title": "The sync itself: which emails, which files, what happens to them", "file": "app/services/email_sync_service.py",
-             "code": src(S._full_query, S._is_pdf, S.sync)},
-            {"title": "Which downloaded PDFs are kept (duplicates are not)", "file": "app/services/import_service.py",
-             "code": src(ImportService._drop_duplicate_files)},
+            {"title": "1. Find the emails (read-only access, search only)", "file": "app/dao/mail/gmail.py, app/services/email_sync_service.py",
+             "code": f'SCOPE = "{g.SCOPE}"\n\n' + src(S._full_query, g.GmailClient.search)},
+            {"title": "2. Read each email and download its PDF attachments", "file": "app/dao/mail/gmail.py, app/services/email_sync_service.py",
+             "code": src(S._is_pdf, g.GmailClient.message, g.GmailClient.attachment)},
         ]}
 
     @api.get("/email/status")

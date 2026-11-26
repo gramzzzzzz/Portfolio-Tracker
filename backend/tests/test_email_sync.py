@@ -201,5 +201,6 @@ def test_source_endpoint_shows_real_code(app_client):
     login(c)
     secs = c.get("/api/email/source").json()["sections"]
     text = "\n".join(s["code"] for s in secs)
-    assert "gmail.readonly" in text and "def sync(" in text and "def attachment(" in text and "def _drop_duplicate_files(" in text
+    assert "gmail.readonly" in text and "def search(" in text and "def message(" in text and "def attachment(" in text
+    assert "def sync(" not in text and "def _get(" not in text  # only the fetch snippets
     assert "messages/send" not in text and "trash" not in text.lower()  # read-only
